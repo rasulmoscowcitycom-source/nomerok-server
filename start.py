@@ -2,5 +2,5 @@
 import os, threading, uvicorn
 import server
 
-threading.Thread(target=lambda: uvicorn.run(server.app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), log_level="warning"), daemon=True).start()
+threading.Thread(target=lambda: uvicorn.run(server.app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), log_level="warning", access_log=False, timeout_keep_alive=75), daemon=True).start()
 import bot  # запускает бота (long polling)

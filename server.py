@@ -1,47 +1,187 @@
-# pip install fastapi uvicorn python-telegram-bot
-# Запуск: uvicorn server:app --host 0.0.0.0 --port 8000   (нужен https-домен)
-import asyncio, random, math, hashlib, hmac, json, sqlite3, time, urllib.parse, urllib.request
+# UZ Номерок: сервер игры (FastAPI + SQLite). Запускается через start.py вместе с ботом.
+# Запросы к базе идут в потоках (сайт не «замирает»), соединения с базой постоянные, есть индексы,
+# проверка подписки кэшируется, база сама чистится и раз в сутки копируется в папку backups.
+import asyncio, gzip, hashlib, hmac, json, logging, math, os, random, shutil, sqlite3, threading, time
+import urllib.parse, urllib.request
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, Request
-import os
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("uzn")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "PASTE_BOT_TOKEN_FROM_BOTFATHER")
 DB_PATH = os.environ.get("DB_PATH", "game.db")
+TG_API = os.environ.get("TG_API", "https://api.telegram.org").rstrip("/")
 # Каналы для призов за подписку: id (как в игре, CHS в html) -> @канал. Бот должен быть АДМИНОМ канала.
 CHANNELS = {"c1": os.environ.get("CHANNEL1", "@your_channel"), "c2": os.environ.get("CHANNEL2", "@your_channel2")}
 REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL", "@your_channel")           # обязательная подписка, чтобы играть ("" = выключить)
 REQUIRED_URL = os.environ.get("REQUIRED_URL", "https://t.me/your_channel")   # ссылка на этот канал
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "your_bot")                    # логин бота без @ (для ссылок-приглашений)
 REF_MILESTONES = [(1, 3000000), (3, 10000000), (5, 25000000), (10, 100000000)]  # друзья -> приз (сум)
-app = FastAPI()
+HERE = os.path.dirname(os.path.abspath(__file__))
+BK_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
+BK_KEEP = int(os.environ.get("BACKUP_KEEP", "5"))
+APP_URL = os.environ.get("APP_URL", "")   # адрес игры (для кнопки «Открыть игру» в сообщениях бота)
+MAX_BODY = 3_000_000   # больше 3 МБ от игрока не принимаем
 
-def db():
-    c = sqlite3.connect(DB_PATH); c.row_factory = sqlite3.Row; c.execute("PRAGMA journal_mode=WAL")
-    c.executescript("""
-    CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,first_seen INT,last_seen INT,state TEXT);
-    CREATE TABLE IF NOT EXISTS gifts(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,data TEXT);
-    CREATE TABLE IF NOT EXISTS promos(code TEXT PRIMARY KEY,reward TEXT,max_uses INT,used INT DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS redeemed(code TEXT,uid INT,PRIMARY KEY(code,uid));
-    CREATE TABLE IF NOT EXISTS offers(id INTEGER PRIMARY KEY AUTOINCREMENT,frm INT,to_id INT,item TEXT,price INT,status TEXT DEFAULT 'open',ts INT);
-    CREATE TABLE IF NOT EXISTS refpending(uid INTEGER PRIMARY KEY,ref INT);
-    CREATE TABLE IF NOT EXISTS referrals(uid INTEGER PRIMARY KEY,ref INT);
-    CREATE TABLE IF NOT EXISTS events(name TEXT,luck REAL,sell REAL,xp REAL,until INT);
-    CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT);
-    CREATE TABLE IF NOT EXISTS uniq(key TEXT PRIMARY KEY,owner INT,ts INT);
-    CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open');
-    """)
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+# ---------------------------------------------------------------- база данных
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,first_seen INT,last_seen INT,state TEXT);
+CREATE TABLE IF NOT EXISTS gifts(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,data TEXT);
+CREATE TABLE IF NOT EXISTS promos(code TEXT PRIMARY KEY,reward TEXT,max_uses INT,used INT DEFAULT 0);
+CREATE TABLE IF NOT EXISTS redeemed(code TEXT,uid INT,PRIMARY KEY(code,uid));
+CREATE TABLE IF NOT EXISTS offers(id INTEGER PRIMARY KEY AUTOINCREMENT,frm INT,to_id INT,item TEXT,price INT,status TEXT DEFAULT 'open',ts INT);
+CREATE TABLE IF NOT EXISTS refpending(uid INTEGER PRIMARY KEY,ref INT);
+CREATE TABLE IF NOT EXISTS referrals(uid INTEGER PRIMARY KEY,ref INT);
+CREATE TABLE IF NOT EXISTS events(name TEXT,luck REAL,sell REAL,xp REAL,until INT);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT);
+CREATE TABLE IF NOT EXISTS uniq(key TEXT PRIMARY KEY,owner INT,ts INT);
+CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open');
+CREATE TABLE IF NOT EXISTS shop(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,price INT,ts INT,status TEXT DEFAULT 'open',buyer INT);
+CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id));
+CREATE TABLE IF NOT EXISTS payments(charge TEXT PRIMARY KEY,uid INT,item TEXT,stars INT,ts INT);
+CREATE INDEX IF NOT EXISTS ix_gifts_uid ON gifts(uid);
+CREATE INDEX IF NOT EXISTS ix_offers_to ON offers(to_id,status);
+CREATE INDEX IF NOT EXISTS ix_offers_frm ON offers(frm,status);
+CREATE INDEX IF NOT EXISTS ix_ref_ref ON referrals(ref);
+CREATE INDEX IF NOT EXISTS ix_auc_open ON auctions(status,end);
+CREATE INDEX IF NOT EXISTS ix_auc_seller ON auctions(seller,status);
+CREATE INDEX IF NOT EXISTS ix_shop_open ON shop(status,id);
+CREATE INDEX IF NOT EXISTS ix_shop_seller ON shop(seller,status);
+CREATE INDEX IF NOT EXISTS ix_uniq_owner ON uniq(owner);
+CREATE INDEX IF NOT EXISTS ix_users_seen ON users(last_seen);
+"""
+
+def init_db():   # один раз при запуске: таблицы, индексы, режим WAL
+    d = os.path.dirname(os.path.abspath(DB_PATH))
+    if d: os.makedirs(d, exist_ok=True)
+    c = sqlite3.connect(DB_PATH, timeout=30)
+    try:
+        c.execute("PRAGMA journal_mode=WAL"); c.executescript(SCHEMA); c.commit()
+    finally: c.close()
+
+init_db()
+_tl = threading.local()
+
+def db():   # у каждого потока своё постоянное соединение (не открываем базу заново на каждый запрос)
+    c = getattr(_tl, "c", None)
+    if c is None:
+        c = sqlite3.connect(DB_PATH, timeout=15); c.row_factory = sqlite3.Row
+        c.execute("PRAGMA synchronous=NORMAL"); c.execute("PRAGMA temp_store=MEMORY"); c.execute("PRAGMA cache_size=-4000")
+        _tl.c = c
+    elif c.in_transaction: c.rollback()   # хвост прерванного запроса не должен попасть в чужую запись
     return c
 
-def auth(init):  # проверка подписи Telegram initData
-    d = dict(urllib.parse.parse_qsl(init)); h = d.pop("hash", "")
-    s = "\n".join(f"{k}={v}" for k, v in sorted(d.items()))
-    key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-    if not hmac.compare_digest(hmac.new(key, s.encode(), hashlib.sha256).hexdigest(), h):
-        raise HTTPException(401, "Нет доступа")
-    u = json.loads(d["user"]); return u["id"], u.get("first_name", "")
+def _end_tx():
+    c = getattr(_tl, "c", None)
+    if c is not None and c.in_transaction:
+        try: c.rollback()
+        except Exception: pass
 
-# ---------- единственные экземпляры: Мифик и Секретный номера есть только у одного игрока ----------
+def auth(init):  # проверка подписи Telegram initData
+    try:
+        d = dict(urllib.parse.parse_qsl(init or "")); h = d.pop("hash", "")
+        s = "\n".join(f"{k}={v}" for k, v in sorted(d.items()))
+        key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        ok = hmac.compare_digest(hmac.new(key, s.encode(), hashlib.sha256).hexdigest(), h)
+        if ok:
+            u = json.loads(d["user"]); return u["id"], u.get("first_name", "")
+    except Exception: pass
+    raise HTTPException(401, "Нет доступа")
+
+# ---------------------------------------------------------------- как обрабатываются запросы
+POOL = ThreadPoolExecutor(max_workers=int(os.environ.get("DB_THREADS", "12")), thread_name_prefix="db")   # запросы к базе
+TGPOOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="tg")                                       # запросы к Telegram (медленные)
+_LAT = deque(maxlen=20000)   # (время, путь, мс) - для /stat в боте
+
+def _resp(res, gz):
+    if isinstance(res, Response): return res
+    raw = bytes(res) if isinstance(res, (bytes, bytearray)) else json.dumps(res, separators=(",", ":")).encode()
+    h = {"Cache-Control": "no-store"}
+    if gz and len(raw) > 1200:
+        raw = gzip.compress(raw, 5); h["Content-Encoding"] = "gzip"; h["Vary"] = "Accept-Encoding"
+    return Response(raw, media_type="application/json", headers=h)
+
+def api(path, method="post", pool=None):
+    """Регистрирует обработчик fn(b): читает JSON, выполняет fn в потоке, отдаёт сжатый ответ."""
+    def deco(fn):
+        async def h(r: Request):
+            p = pool or POOL
+            if p._work_queue.qsize() > 400: raise HTTPException(503, "Сервер занят, попробуйте ещё раз")
+            try:
+                if int(r.headers.get("content-length") or 0) > MAX_BODY: raise HTTPException(413, "Слишком большой запрос")
+            except ValueError: pass
+            body = await r.body()
+            if len(body) > MAX_BODY: raise HTTPException(413, "Слишком большой запрос")
+            gz = "gzip" in r.headers.get("accept-encoding", "")
+            t0 = time.perf_counter()
+            def work():
+                try:
+                    try: b = json.loads(body) if body else {}
+                    except ValueError: raise HTTPException(400, "Неверный запрос")
+                    if not isinstance(b, dict): raise HTTPException(400, "Неверный запрос")
+                    return _resp(fn(b), gz)
+                finally: _end_tx()
+            try: return await asyncio.get_running_loop().run_in_executor(p, work)
+            finally:
+                dt = time.perf_counter() - t0; _LAT.append((time.time(), path, dt * 1000))
+                if dt > 2: log.warning("медленный запрос %s: %.1f c", path, dt)
+        h.__name__ = fn.__name__
+        getattr(app, method)(path)(h)
+        return fn
+    return deco
+
+def tg_request(method, params=None, timeout=6):   # вызов Telegram Bot API (только из потока TGPOOL)
+    url = "%s/bot%s/%s" % (TG_API, BOT_TOKEN, method)
+    if params is not None: url = urllib.request.Request(url, data=json.dumps(params).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(url, timeout=timeout) as r: return json.load(r)
+
+# ---------------------------------------------------------------- сообщения от бота игрокам (перебили ставку, лот продан и т.д.)
+def fnum(n):   # 1 000 000
+    try: return "{:,}".format(int(n)).replace(",", " ")
+    except Exception: return str(n)
+
+def plate_txt(p):
+    try:
+        r, d, z, a = str(p.get("r", "")), str(p.get("d", "")), str(p.get("z", "")), str(p.get("a") or "")
+        return ("%s %s %s" % (r, d, z)) if p.get("k") else ("%s %s %s %s" % (r, a, d, z))
+    except Exception: return "номер"
+
+def item_txt(it):
+    try:
+        v = it.get("v") or {}
+        if it.get("t") == "car":
+            return "🚗 %s%s" % (str(v.get("n", "машина"))[:40], (" + номер " + plate_txt(v["pl"])) if isinstance(v.get("pl"), dict) else "")
+        return "🔢 номер " + plate_txt(v)
+    except Exception: return "предмет"
+
+def left_txt(sec):
+    sec = max(0, int(sec))
+    if sec >= 3600: return "%d ч %d мин" % (sec // 3600, sec % 3600 // 60)
+    if sec >= 60: return "%d мин" % (sec // 60)
+    return "%d сек" % sec
+
+def notify(uid, text, btn="🎰 Открыть игру"):
+    """Отправить игроку сообщение от бота (в фоне; если игрок заблокировал бота - молча пропускаем)."""
+    try: uid = int(uid)
+    except (TypeError, ValueError): return
+    if uid <= 0 or TGPOOL._work_queue.qsize() > 3000: return
+    def job():
+        try:
+            m = {"chat_id": uid, "text": text[:3500], "disable_web_page_preview": True}
+            if APP_URL.startswith("https://"): m["reply_markup"] = {"inline_keyboard": [[{"text": btn, "web_app": {"url": APP_URL}}]]}
+            tg_request("sendMessage", m, timeout=8)
+        except Exception as e: log.debug("сообщение игроку %s не доставлено: %s", uid, e)
+    try: TGPOOL.submit(job)
+    except Exception: pass
+
+# ---------------------------------------------------------------- единственные экземпляры: Мифик и Секретный номера есть только у одного игрока
 SPSER = {"UZB", "AAA", "SBA"}
 SPX = [(1, "879", "MEA", ""), (1, "762", "MMA", ""), (1, "500", "SOO", ""), (0, "777", "ZZ", "Z"), (0, "001", "OO", "O")]
 SSX = {"PAA": 4, "PSS": 4, "PPP": 3, "APC": 3, "TSS": 3, "TST": 3, "ZDF": 3, "DXA": 2, "FVV": 2, "VSB": 2, "VSC": 2, "VSF": 2, "VSD": 2, "VSG": 2, "VSV": 2, "PSF": 2,
@@ -66,7 +206,7 @@ def tier_py(p):  # то же, что tier() в игре
 def ukey(p): return "%s|%s|%s|%s|%s" % (p.get("k"), p.get("r"), p.get("a") or "", p.get("d"), p.get("z"))
 def is_uniq(p): return isinstance(p, dict) and tier_py(p) >= 4
 
-def uniq_set(c, uid, p):
+def uniq_set(c, uid, p):   # передать номер новому владельцу
     c.execute("INSERT OR REPLACE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time())))
 
 def gift(c, uid, d):
@@ -81,34 +221,32 @@ def clean_plate(p):
     except Exception: raise HTTPException(400, "Неверный номер")
     return {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
 
-@app.post("/api/uclaim")
-async def uclaim(r: Request):   # игрок выбил номер: если это Мифик/Секретный - закрепить его за собой, если свободен
-    b = await r.json(); uid, _ = auth(b["initData"]); p = clean_plate(b.get("p") or {}); c = db()
+@api("/api/uclaim")
+def uclaim(b):   # игрок выбил номер: если это Мифик/Секретный - закрепить его за собой, если свободен
+    uid, _ = auth(b.get("initData")); p = clean_plate(b.get("p") or {}); c = db()
     if tier_py(p) < 4: return {"ok": 1, "free": 1}
+    c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time()))); c.commit()   # кто успел первым - тот и владелец
     row = c.execute("SELECT owner FROM uniq WHERE key=?", (ukey(p),)).fetchone()
     if row and row["owner"] != uid: return {"ok": 0, "taken": 1}
-    if not row:
-        try: uniq_set(c, uid, p); c.commit()
-        except sqlite3.IntegrityError: return {"ok": 0, "taken": 1}
     return {"ok": 1}
 
-@app.post("/api/urel")
-async def urel(r: Request):   # игрок продал уникальный номер магазину - он снова может выпасть
-    b = await r.json(); uid, _ = auth(b["initData"]); p = clean_plate(b.get("p") or {}); c = db()
+@api("/api/urel")
+def urel(b):   # игрок продал уникальный номер магазину - он снова может выпасть
+    uid, _ = auth(b.get("initData")); p = clean_plate(b.get("p") or {}); c = db()
     c.execute("DELETE FROM uniq WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()
     return {"ok": 1}
 
-@app.post("/api/ucheck")
-async def ucheck(r: Request):   # проверить номер: редкость, занят ли
-    b = await r.json(); uid, _ = auth(b["initData"]); p = clean_plate(b.get("p") or {}); c = db(); t = tier_py(p)
+@api("/api/ucheck")
+def ucheck(b):   # проверить номер: редкость, занят ли
+    uid, _ = auth(b.get("initData")); p = clean_plate(b.get("p") or {}); c = db(); t = tier_py(p)
     row = c.execute("SELECT owner FROM uniq WHERE key=?", (ukey(p),)).fetchone() if t >= 4 else None
     own = None
     if row:
         u = c.execute("SELECT name FROM users WHERE id=?", (row["owner"],)).fetchone(); own = (u["name"] if u else "игрок") if row["owner"] != uid else "вы"
     return {"tier": t, "unique": t >= 4, "taken": bool(row), "owner": own}
 
-@app.get("/api/ustats")
-def ustats():
+@api("/api/ustats", method="get")
+def ustats(b):
     c = db(); n = {4: 0, 5: 0}
     for x in c.execute("SELECT key FROM uniq").fetchall():
         k, r, a, d, z = x["key"].split("|"); t = tier_py({"k": int(k), "r": r, "a": a, "d": d, "z": z})
@@ -118,129 +256,218 @@ def ustats():
 def uniq_backfill():   # один раз при запуске: записать за игроками их Мифик/Секретные номера
     c = db()
     if c.execute("SELECT 1 FROM meta WHERE k='uniq_bf'").fetchone(): return
-    for u in c.execute("SELECT id,state FROM users WHERE state IS NOT NULL").fetchall():
-        try: st = json.loads(u["state"])
+    for (uid,) in c.execute("SELECT id FROM users WHERE state IS NOT NULL").fetchall():
+        row = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
+        try: st = json.loads(row["state"])
         except Exception: continue
         pls = list(st.get("col") or []) + [x.get("pl") for x in (st.get("cars") or []) if x.get("pl")]
         for p in pls:
-            if is_uniq(p) and not c.execute("SELECT 1 FROM uniq WHERE key=?", (ukey(p),)).fetchone(): uniq_set(c, u["id"], p)
+            if is_uniq(p) and not c.execute("SELECT 1 FROM uniq WHERE key=?", (ukey(p),)).fetchone(): uniq_set(c, uid, p)
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('uniq_bf','1')"); c.commit()
 
-@app.get("/")
-def index(): return FileResponse("uz-nomerok-tg.html")
+# ---------------------------------------------------------------- главная страница (сжатая копия в памяти + ETag)
+_IDX = {}
+def _index_entry():
+    path = os.path.join(HERE, "uz-nomerok-tg.html"); mt = os.stat(path).st_mtime_ns
+    e = _IDX.get("e")
+    if e and e["mt"] == mt: return e
+    raw = open(path, "rb").read()
+    e = {"mt": mt, "raw": raw, "gz": gzip.compress(raw, 9), "etag": '"%s"' % hashlib.md5(raw).hexdigest()}
+    _IDX["e"] = e; return e
 
-@app.post("/api/load")
-async def load(r: Request):
-    b = await r.json(); uid, name = auth(b["initData"]); now = int(time.time()); c = db()
+@app.get("/")
+async def index(r: Request):
+    e = _index_entry()
+    h = {"ETag": e["etag"], "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+    if r.headers.get("if-none-match") == e["etag"]: return Response(status_code=304, headers=h)
+    if "gzip" in r.headers.get("accept-encoding", ""):
+        h["Content-Encoding"] = "gzip"; return Response(e["gz"], media_type="text/html; charset=utf-8", headers=h)
+    return Response(e["raw"], media_type="text/html; charset=utf-8", headers=h)
+
+@app.get("/healthz")
+async def healthz(): return Response('{"ok":1}', media_type="application/json", headers={"Cache-Control": "no-store"})
+
+# ---------------------------------------------------------------- общие запросы
+def get_rid(c):  # номер "сезона": при сбросе прогресса увеличивается
+    r = c.execute("SELECT v FROM meta WHERE k='rid'").fetchone()
+    return int(r[0]) if r else 0
+
+def gifts_of(c, uid):
+    return [{"id": x["id"], **json.loads(x["data"])} for x in c.execute("SELECT id,data FROM gifts WHERE uid=? ORDER BY id LIMIT 500", (uid,))]
+
+def ref_count(c, uid): return c.execute("SELECT COUNT(*) FROM referrals WHERE ref=?", (uid,)).fetchone()[0]
+
+def offers_of(c, uid):
+    def rows(w): return [{"id": x["id"], "frm": x["frm"], "to_id": x["to_id"], "item": json.loads(x["item"]), "price": x["price"]}
+                         for x in c.execute("SELECT * FROM offers WHERE status='open' AND " + w + " ORDER BY id LIMIT 100", (uid,))]
+    return {"incoming": rows("to_id=?"), "outgoing": rows("frm=?")}
+
+_EVC = [0, None]
+def event_of(c):   # текущий ивент (кэш 5 сек), общий для всех игроков
+    t = time.time()
+    if _EVC[1] is None or t - _EVC[0] > 5:
+        e = c.execute("SELECT * FROM events WHERE until>? ORDER BY until DESC LIMIT 1", (int(t),)).fetchone()
+        _EVC[0] = t; _EVC[1] = {**(dict(e) if e else {}), "rid": get_rid(c)}
+    return _EVC[1]
+
+def ref_credit(c, uid):  # засчитать приглашение, когда новый игрок впервые зашёл в игру
+    p = c.execute("SELECT ref FROM refpending WHERE uid=?", (uid,)).fetchone()
+    if not p or p["ref"] == uid or not c.execute("SELECT 1 FROM users WHERE id=?", (p["ref"],)).fetchone(): return
+    if c.execute("INSERT OR IGNORE INTO referrals VALUES(?,?)", (uid, p["ref"])).rowcount != 1: return   # уже засчитан
+    n = c.execute("SELECT COUNT(*) FROM referrals WHERE ref=?", (p["ref"],)).fetchone()[0]
+    for need, reward in REF_MILESTONES:
+        if n == need: gift(c, p["ref"], {"t": "bal", "v": reward})
+
+@api("/api/load")
+def load(b):
+    uid, name = auth(b.get("initData")); now = int(time.time()); c = db()
     existed = c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone()
     c.execute("INSERT INTO users(id,name,first_seen,last_seen) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=?,last_seen=?", (uid, name, now, now, name, now))
     if not existed: ref_credit(c, uid)
     row = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
-    g = [{"id": x["id"], **json.loads(x["data"])} for x in c.execute("SELECT * FROM gifts WHERE uid=?", (uid,))]
-    n = c.execute("SELECT COUNT(*) FROM referrals WHERE ref=?", (uid,)).fetchone()[0]
+    head = json.dumps({"uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c)}, separators=(",", ":"))
     c.commit()
-    return {"uid": uid, "state": json.loads(row["state"]) if row["state"] else None, "gifts": g, "ref": {"n": n, "bot": BOT_USERNAME}, "rid": get_rid(c)}
+    state = row["state"] if row and row["state"] else "null"   # состояние уже хранится как JSON - вставляем как есть
+    return ('{"state":%s,%s' % (state, head[1:])).encode()
 
-@app.post("/api/save")
-async def save(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); c = db()
-    if str(b["state"].get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
-    c.execute("UPDATE users SET state=?,last_seen=? WHERE id=?", (json.dumps(b["state"]), int(time.time()), uid)); c.commit()
+_SEEN = {}
+@api("/api/poll")
+def poll(b):   # один лёгкий запрос вместо четырёх: подарки, обмены, друзья, ивент
+    uid, _ = auth(b.get("initData")); c = db(); t = time.time()
+    if t - _SEEN.get(uid, 0) > 120:
+        _SEEN[uid] = t
+        if len(_SEEN) > 100000: _SEEN.clear()
+        c.execute("UPDATE users SET last_seen=? WHERE id=?", (int(t), uid)); c.commit()
+    return {"gifts": gifts_of(c, uid), "offers": offers_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "ev": event_of(c)}
+
+@api("/api/save")
+def save(b):
+    uid, _ = auth(b.get("initData")); c = db(); st = b.get("state")
+    if not isinstance(st, dict): raise HTTPException(400, "Неверное состояние")
+    if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
+    c.execute("UPDATE users SET state=?,last_seen=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), uid)); c.commit()
     return {"ok": 1}
 
-@app.post("/api/gifts/clear")
-async def clear(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); ids = [int(i) for i in b.get("ids", [])]; c = db()
+@api("/api/gifts/clear")
+def clear(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: ids = [int(i) for i in (b.get("ids") or [])][:500]
+    except (TypeError, ValueError): raise HTTPException(400, "Неверные данные")
     if ids: c.execute("DELETE FROM gifts WHERE uid=? AND id IN (%s)" % ",".join("?" * len(ids)), [uid, *ids]); c.commit()
     return {"ok": 1}
 
-@app.post("/api/promo")
-async def promo(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); code = b["code"].strip().upper(); c = db()
+@api("/api/gifts")
+def gifts(b):
+    uid, _ = auth(b.get("initData")); return {"gifts": gifts_of(db(), uid)}
+
+@api("/api/promo")
+def promo(b):
+    uid, _ = auth(b.get("initData")); code = str(b.get("code", "")).strip().upper(); c = db()
     p = c.execute("SELECT * FROM promos WHERE code=?", (code,)).fetchone()
     if not p: raise HTTPException(400, "Промокод не найден")
     if p["used"] >= p["max_uses"]: raise HTTPException(400, "Промокод закончился")
     try: c.execute("INSERT INTO redeemed VALUES(?,?)", (code, uid))
     except sqlite3.IntegrityError: raise HTTPException(400, "Вы уже активировали этот код")
-    c.execute("UPDATE promos SET used=used+1 WHERE code=?", (code,)); c.commit()
+    if c.execute("UPDATE promos SET used=used+1 WHERE code=? AND used<max_uses", (code,)).rowcount != 1:   # последний код забрали в ту же секунду
+        c.rollback(); raise HTTPException(400, "Промокод закончился")
+    c.commit()
     return {"reward": json.loads(p["reward"])}
 
-@app.post("/api/offer/create")
-async def offer_create(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); c = db(); to = int(b["to"]); price = int(b["price"])
+@api("/api/offer/create")
+def offer_create(b):
+    uid, uname = auth(b.get("initData")); c = db()
+    try: to = int(b["to"]); price = int(b["price"])
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    item = b.get("item")
     if price < 0 or not c.execute("SELECT 1 FROM users WHERE id=?", (to,)).fetchone():
         raise HTTPException(400, "Игрок с таким ID не найден")
-    c.execute("INSERT INTO offers(frm,to_id,item,price,ts) VALUES(?,?,?,?,?)", (uid, to, json.dumps(b["item"]), price, int(time.time()))); c.commit()
+    if not isinstance(item, dict) or item.get("t") not in ("plate", "car") or not isinstance(item.get("v"), dict):
+        raise HTTPException(400, "Неверные данные предложения")
+    c.execute("INSERT INTO offers(frm,to_id,item,price,ts) VALUES(?,?,?,?,?)", (uid, to, json.dumps(item), price, int(time.time()))); c.commit()
+    notify(to, "🤝 %s предлагает вам обмен:\n%s\nЦена: %s" % (str(uname)[:30] or ("ID %d" % uid), item_txt(item), (fnum(price) + " сум") if price else "бесплатно (подарок)"), "🤝 Открыть предложение")
     return {"ok": 1}
 
-@app.post("/api/offer/list")
-async def offer_list(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); c = db()
-    def rows(w): return [{"id": x["id"], "frm": x["frm"], "to_id": x["to_id"], "item": json.loads(x["item"]), "price": x["price"]}
-                         for x in c.execute("SELECT * FROM offers WHERE status='open' AND " + w, (uid,))]
-    return {"incoming": rows("to_id=?"), "outgoing": rows("frm=?")}
+@api("/api/offer/list")
+def offer_list(b):
+    uid, _ = auth(b.get("initData")); return offers_of(db(), uid)
 
-@app.post("/api/offer/accept")
-async def offer_accept(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); c = db()
-    o = c.execute("SELECT * FROM offers WHERE id=? AND status='open'", (int(b["id"]),)).fetchone()
+@api("/api/offer/accept")
+def offer_accept(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    o = c.execute("SELECT * FROM offers WHERE id=? AND status='open'", (int(b.get("id", 0)),)).fetchone()
     if not o or o["to_id"] != uid: raise HTTPException(400, "Предложение недоступно")
     if c.execute("UPDATE offers SET status='done' WHERE id=? AND status='open'", (o["id"],)).rowcount != 1:
         raise HTTPException(400, "Предложение недоступно")
     gift(c, uid, json.loads(o["item"])); gift(c, o["frm"], {"t": "bal", "v": o["price"]}); c.commit()
+    notify(o["frm"], "✅ Ваше предложение принято!\n%s\nВам начислено: %s сум" % (item_txt(json.loads(o["item"])), fnum(o["price"])))
     return {"ok": 1}
 
-@app.post("/api/offer/cancel")
-async def offer_cancel(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); c = db()
-    o = c.execute("SELECT * FROM offers WHERE id=? AND status='open'", (int(b["id"]),)).fetchone()
+@api("/api/offer/cancel")
+def offer_cancel(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    o = c.execute("SELECT * FROM offers WHERE id=? AND status='open'", (int(b.get("id", 0)),)).fetchone()
     if not o or o["frm"] != uid: raise HTTPException(400, "Предложение недоступно")
     if c.execute("UPDATE offers SET status='cancelled' WHERE id=? AND status='open'", (o["id"],)).rowcount != 1:
         raise HTTPException(400, "Предложение недоступно")
     gift(c, uid, json.loads(o["item"])); c.commit()
     return {"ok": 1}
 
-os.makedirs("cars", exist_ok=True)
-app.mount("/cars", StaticFiles(directory="cars"), name="cars")  # фото машин: cars/имя.jpg
+os.makedirs(os.path.join(HERE, "cars"), exist_ok=True)
 
-@app.post("/api/sub")
-async def sub(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); cid = b.get("id"); c = db()
+class CarFiles(StaticFiles):   # фото машин кэшируются в телефоне на неделю
+    def file_response(self, *a, **k):
+        r = super().file_response(*a, **k); r.headers["Cache-Control"] = "public, max-age=604800"; return r
+
+app.mount("/cars", CarFiles(directory=os.path.join(HERE, "cars")), name="cars")  # фото машин: cars/имя.jpg
+_CI = [0, []]
+
+@api("/api/carimgs", method="get")
+def carimgs(b):   # какие фото машин реально лежат в папке cars (игра не просит несуществующие)
+    t = time.time()
+    if t - _CI[0] > 60:
+        try: _CI[1] = sorted(f[:-4] for f in os.listdir(os.path.join(HERE, "cars")) if f.lower().endswith(".jpg"))
+        except OSError: _CI[1] = []
+        _CI[0] = t
+    return {"list": _CI[1]}
+
+# ---------------------------------------------------------------- подписка на каналы (Telegram отвечает медленно: отдельные потоки + кэш)
+_GATE = {}   # (канал, игрок) -> (до какого времени верить, подписан, когда проверяли)
+
+def member_ok(chat, uid, force=False):
+    key = (chat, uid); t = time.time(); e = _GATE.get(key)
+    if e and e[0] > t and not (force and not e[1] and t - e[2] > 3): return e[1]
+    try:
+        res = tg_request("getChatMember?chat_id=%s&user_id=%d" % (urllib.parse.quote(chat), uid))
+        ok = res.get("result", {}).get("status") in ("member", "administrator", "creator"); ttl = 600 if ok else 15
+    except Exception as ex:
+        log.warning("getChatMember не ответил: %s", type(ex).__name__)
+        ok, ttl = True, 60   # не удалось проверить (бот не админ?) - не блокируем игру
+    if len(_GATE) > 50000: _GATE.clear()
+    _GATE[key] = (t + ttl, ok, t); return ok
+
+@api("/api/gate", pool=TGPOOL)
+def gate(b):
+    uid, _ = auth(b.get("initData"))
+    if not REQUIRED_CHANNEL: return {"ok": True}
+    return {"ok": member_ok(REQUIRED_CHANNEL, uid, bool(b.get("force"))), "url": REQUIRED_URL}
+
+@api("/api/sub", pool=TGPOOL)
+def sub(b):
+    uid, _ = auth(b.get("initData")); cid = b.get("id"); c = db()
     ch = CHANNELS.get(cid)
     if not ch: raise HTTPException(400, "Канал не найден")
-    c.execute("CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id))")
     if c.execute("SELECT 1 FROM claims WHERE uid=? AND id=?", (uid, cid)).fetchone(): raise HTTPException(400, "Уже получено")
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember?chat_id={urllib.parse.quote(ch)}&user_id={uid}"
-    try: res = json.load(urllib.request.urlopen(url, timeout=8))
+    try: res = tg_request("getChatMember?chat_id=%s&user_id=%d" % (urllib.parse.quote(ch), uid), timeout=8)
     except Exception: raise HTTPException(400, "Не удалось проверить подписку")
     if res.get("result", {}).get("status") not in ("member", "administrator", "creator"):
         raise HTTPException(400, "Сначала подпишитесь на канал")
-    c.execute("INSERT INTO claims VALUES(?,?)", (uid, cid)); c.commit()
+    try: c.execute("INSERT INTO claims VALUES(?,?)", (uid, cid)); c.commit()
+    except sqlite3.IntegrityError: raise HTTPException(400, "Уже получено")
     return {"ok": 1}
 
-def ref_credit(c, uid):  # засчитать приглашение, когда новый игрок впервые зашёл в игру
-    p = c.execute("SELECT ref FROM refpending WHERE uid=?", (uid,)).fetchone()
-    if not p or p["ref"] == uid or not c.execute("SELECT 1 FROM users WHERE id=?", (p["ref"],)).fetchone(): return
-    c.execute("INSERT OR IGNORE INTO referrals VALUES(?,?)", (uid, p["ref"]))
-    n = c.execute("SELECT COUNT(*) FROM referrals WHERE ref=?", (p["ref"],)).fetchone()[0]
-    for need, reward in REF_MILESTONES:
-        if n == need: gift(c, p["ref"], {"t": "bal", "v": reward})
-
-@app.post("/api/gate")
-async def gate(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"])
-    if not REQUIRED_CHANNEL: return {"ok": True}
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember?chat_id={urllib.parse.quote(REQUIRED_CHANNEL)}&user_id={uid}"
-    try: res = json.load(urllib.request.urlopen(url, timeout=8))
-    except Exception: return {"ok": True}   # не удалось проверить (бот не админ?) - не блокируем игру
-    ok = res.get("result", {}).get("status") in ("member", "administrator", "creator")
-    return {"ok": ok, "url": REQUIRED_URL}
-
-@app.post("/api/event")
-async def event(r: Request):
-    b = await r.json(); auth(b["initData"]); c = db()
-    e = c.execute("SELECT * FROM events WHERE until>? ORDER BY until DESC LIMIT 1", (int(time.time()),)).fetchone()
-    return {**(dict(e) if e else {}), "rid": get_rid(c)}
+@api("/api/event")
+def event(b):
+    auth(b.get("initData")); return event_of(db())
 
 REGS = ["01", "10", "20", "25", "30", "40", "50", "60", "70", "75", "80", "85", "90", "95"]
 LETTERS = set("ABCDEFGHJKLMNPRSTUVWXYZ")
@@ -265,74 +492,73 @@ def check_plate(p):  # проверка номера, который игрок 
         raise HTTPException(400, "Этот номер купить нельзя")
     return {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
 
-@app.post("/api/invoice")
-async def invoice(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); item = b.get("item")
+@api("/api/invoice", pool=TGPOOL)
+def invoice(b):
+    uid, _ = auth(b.get("initData")); item = b.get("item")
     if item not in STAR_ITEMS: raise HTTPException(400, "Товар не найден")
     amount, title, desc = STAR_ITEMS[item]; payload = {"u": uid, "i": item}
     if item == "p500": payload["p"] = check_plate(b.get("plate") or {})
     pl = json.dumps(payload, separators=(",", ":"))
-    data = json.dumps({"title": title, "description": desc, "payload": pl, "provider_token": "", "currency": "XTR",
-                       "prices": [{"label": title, "amount": amount}]}).encode()
-    req = urllib.request.Request(f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink", data=data, headers={"Content-Type": "application/json"})
-    try: res = json.load(urllib.request.urlopen(req, timeout=10))
+    try: res = tg_request("createInvoiceLink", {"title": title, "description": desc, "payload": pl, "provider_token": "", "currency": "XTR",
+                                                "prices": [{"label": title, "amount": amount}]}, timeout=10)
     except Exception: raise HTTPException(400, "Не удалось создать счёт")
     if not res.get("ok"): raise HTTPException(400, "Не удалось создать счёт")
     return {"url": res["result"]}
 
-# ---------- аукцион между игроками (в реальном времени, опрос раз в 2 сек) ----------
+# ---------------------------------------------------------------- аукцион между игроками (в реальном времени, опрос раз в 2 сек)
 def settle(c):  # завершить аукционы, у которых вышло время
-    now = int(time.time())
+    now = int(time.time()); notes = []
     for a in c.execute("SELECT * FROM auctions WHERE status='open' AND end<=?", (now,)).fetchall():
         if c.execute("UPDATE auctions SET status='done' WHERE id=? AND status='open'", (a["id"],)).rowcount != 1: continue
-        item = json.loads(a["item"])
+        item = json.loads(a["item"]); nm = item_txt(item)
         if a["topuid"]:
             gift(c, a["topuid"], item)
-            if a["seller"]: gift(c, a["seller"], {"t": "bal", "v": int(a["top"] * 0.95)})  # продавец получает 95%
+            notes.append((a["topuid"], "🏆 Вы выиграли аукцион!\n%s\nВаша ставка: %s сум. Предмет уже в вашей коллекции." % (nm, fnum(a["top"])), "🏆 Забрать"))
+            if a["seller"]:
+                got = int(a["top"] * 0.95); gift(c, a["seller"], {"t": "bal", "v": got})  # продавец получает 95%
+                notes.append((a["seller"], "✅ Ваш лот продан!\n%s\nЦена: %s сум. Вам начислено %s сум (95%%)." % (nm, fnum(a["top"]), fnum(got)), "💰 Открыть игру"))
         elif a["seller"]:
             gift(c, a["seller"], item)   # ставок не было - предмет возвращается
+            notes.append((a["seller"], "⌛ Торги закончились без ставок.\n%s\nПредмет вернулся в вашу коллекцию." % nm, "Открыть игру"))
     c.commit()
-
-@app.on_event("startup")
-async def _auction_loop():
-    async def loop():
-        while True:
-            await asyncio.sleep(5)
-            try: c = db(); settle(c); system_lot(c)
-            except Exception: pass
-    try: uniq_backfill()
-    except Exception: pass
-    asyncio.create_task(loop())
+    for n in notes: notify(*n)
 
 def next_price(a): return a["start"] if not a["topuid"] else math.ceil(a["top"] * 1.05)
 
-@app.post("/api/gifts")
-async def gifts(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); c = db()
-    return {"gifts": [{"id": x["id"], **json.loads(x["data"])} for x in c.execute("SELECT * FROM gifts WHERE uid=?", (uid,))]}
+_AUC = [0, []]
+def auc_snapshot(c):   # список лотов: один раз в секунду на всех игроков сразу
+    t = time.time()
+    if t - _AUC[0] < 1.0: return _AUC[1]
+    if c.execute("SELECT 1 FROM auctions WHERE status='open' AND end<=? LIMIT 1", (int(t),)).fetchone(): settle(c)
+    rows = c.execute("SELECT * FROM auctions WHERE status='open' ORDER BY end LIMIT 100").fetchall()
+    _AUC[1] = [{"id": a["id"], "seller": a["seller"], "item": json.loads(a["item"]), "start": a["start"],
+                "top": a["top"], "topuid": a["topuid"], "end": a["end"], "next": next_price(a)} for a in rows]
+    _AUC[0] = t; return _AUC[1]
 
-@app.post("/api/auc/create")
-async def auc_create(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); c = db(); item = b.get("item") or {}
-    start = int(b.get("start", 0)); mins = int(b.get("mins", 0))
-    if item.get("t") not in ("plate", "car") or not isinstance(item.get("v"), dict) or mins not in (1, 3, 10) or not (1000 <= start <= 10**10):
+@api("/api/auc/create")
+def auc_create(b):
+    uid, _ = auth(b.get("initData")); c = db(); item = b.get("item") or {}
+    try: start = int(b.get("start", 0)); mins = int(b.get("mins", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверные данные лота")
+    if item.get("t") not in ("plate", "car") or not isinstance(item.get("v"), dict) or mins not in (1, 3, 10, 60, 360, 1440) or not (1000 <= start <= 10**10):
         raise HTTPException(400, "Неверные данные лота")
-    if c.execute("SELECT COUNT(*) FROM auctions WHERE seller=? AND status='open'", (uid,)).fetchone()[0] >= 5:
-        raise HTTPException(400, "Не больше 5 лотов одновременно")
+    if c.execute("SELECT COUNT(*) FROM auctions WHERE seller=? AND status='open'", (uid,)).fetchone()[0] >= 10:
+        raise HTTPException(400, "Не больше 10 лотов одновременно")
     c.execute("INSERT INTO auctions(seller,item,start,end) VALUES(?,?,?,?)", (uid, json.dumps(item), start, int(time.time()) + mins * 60)); c.commit()
+    _AUC[0] = 0
     return {"ok": 1}
 
-@app.post("/api/auc/list")
-async def auc_list(r: Request):
-    b = await r.json(); auth(b["initData"]); c = db(); settle(c)
-    rows = c.execute("SELECT * FROM auctions WHERE status='open' ORDER BY end LIMIT 50").fetchall()
-    return {"now": int(time.time()), "list": [{"id": a["id"], "seller": a["seller"], "item": json.loads(a["item"]), "start": a["start"],
-            "top": a["top"], "topuid": a["topuid"], "end": a["end"], "next": next_price(a)} for a in rows]}
+@api("/api/auc/list")
+def auc_list(b):   # список лотов + подарки игрока одним запросом
+    uid, _ = auth(b.get("initData")); c = db()
+    return {"now": int(time.time()), "list": auc_snapshot(c), "gifts": gifts_of(c, uid)}
 
-@app.post("/api/auc/bid")
-async def auc_bid(r: Request):
-    b = await r.json(); uid, _ = auth(b["initData"]); c = db(); settle(c); now = int(time.time())
-    a = c.execute("SELECT * FROM auctions WHERE id=? AND status='open' AND end>?", (int(b["id"]), now)).fetchone()
+@api("/api/auc/bid")
+def auc_bid(b):
+    uid, _ = auth(b.get("initData")); c = db(); settle(c); now = int(time.time())
+    try: aid = int(b["id"])
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    a = c.execute("SELECT * FROM auctions WHERE id=? AND status='open' AND end>?", (aid, now)).fetchone()
     if not a: raise HTTPException(400, "Торги уже закончились")
     if a["seller"] == uid: raise HTTPException(400, "Нельзя ставить на свой лот")
     if a["topuid"] == uid: raise HTTPException(400, "Вы уже лидер")
@@ -342,12 +568,77 @@ async def auc_bid(r: Request):
                    (price, uid, now + 15, a["id"], now, a["top"], a["topuid"] or 0)).rowcount
     if ok != 1: raise HTTPException(400, "Вашу ставку перебили, попробуйте ещё раз")
     if a["topuid"]: gift(c, a["topuid"], {"t": "bal", "v": a["top"]})   # возврат прошлому лидеру
-    c.commit()
+    c.commit(); _AUC[0] = 0
+    if a["topuid"]:
+        notify(a["topuid"], "🔨 Вашу ставку перебили!\n%s\nНовая ставка: %s сум. Ваши %s сум уже вернулись на баланс.\nДо конца торгов: %s" % (
+            item_txt(json.loads(a["item"])), fnum(price), fnum(a["top"]), left_txt(max(a["end"], now + 15) - now)), "🔨 Перебить ставку")
     return {"ok": 1, "price": price}
 
-def get_rid(c):  # номер "сезона": при сбросе прогресса увеличивается
-    r = c.execute("SELECT v FROM meta WHERE k='rid'").fetchone()
-    return int(r[0]) if r else 0
+@api("/api/auc/cancel")
+def auc_cancel(b):   # продавец снимает свой лот, если ставок ещё нет
+    uid, _ = auth(b.get("initData")); c = db()
+    try: aid = int(b["id"])
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    a = c.execute("SELECT * FROM auctions WHERE id=? AND status='open'", (aid,)).fetchone()
+    if not a or a["seller"] != uid: raise HTTPException(400, "Лот недоступен")
+    if c.execute("UPDATE auctions SET status='cancelled' WHERE id=? AND status='open' AND topuid IS NULL", (aid,)).rowcount != 1:
+        raise HTTPException(400, "На лот уже сделали ставку, снять нельзя")
+    gift(c, uid, json.loads(a["item"])); c.commit(); _AUC[0] = 0
+    return {"ok": 1}
+
+# ---------------------------------------------------------------- витрина: игроки продают номера и машины по фиксированной цене
+_SHOP = [0, []]
+def shop_snapshot(c):   # список витрины: один раз в 2 секунды на всех игроков сразу
+    t = time.time()
+    if t - _SHOP[0] < 2.0: return _SHOP[1]
+    rows = c.execute("SELECT s.id,s.seller,s.item,s.price,s.ts,u.name FROM shop s LEFT JOIN users u ON u.id=s.seller WHERE s.status='open' ORDER BY s.id DESC LIMIT 150").fetchall()
+    _SHOP[1] = [{"id": r["id"], "seller": r["seller"], "sn": str(r["name"] or "")[:24], "item": json.loads(r["item"]), "price": r["price"], "ts": r["ts"]} for r in rows]
+    _SHOP[0] = t; return _SHOP[1]
+
+@api("/api/shop/list")
+def shop_list(b):
+    uid, _ = auth(b.get("initData")); return {"list": shop_snapshot(db())}
+
+@api("/api/shop/create")
+def shop_create(b):
+    uid, _ = auth(b.get("initData")); c = db(); item = b.get("item") or {}
+    try: price = int(b.get("price", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверная цена")
+    if not isinstance(item, dict) or item.get("t") not in ("plate", "car") or not isinstance(item.get("v"), dict) or not (1000 <= price <= 10**10):
+        raise HTTPException(400, "Неверные данные: цена от 1 000")
+    if c.execute("SELECT COUNT(*) FROM shop WHERE seller=? AND status='open'", (uid,)).fetchone()[0] >= 20:
+        raise HTTPException(400, "Не больше 20 предметов на витрине")
+    c.execute("INSERT INTO shop(seller,item,price,ts) VALUES(?,?,?,?)", (uid, json.dumps(item), price, int(time.time()))); c.commit()
+    _SHOP[0] = 0
+    return {"ok": 1}
+
+@api("/api/shop/buy")
+def shop_buy(b):
+    uid, uname = auth(b.get("initData")); c = db()
+    try: sid = int(b["id"]); exp = int(b.get("exp", -1))
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    o = c.execute("SELECT * FROM shop WHERE id=? AND status='open'", (sid,)).fetchone()
+    if not o: raise HTTPException(400, "Уже куплено или снято с продажи")
+    if o["seller"] == uid: raise HTTPException(400, "Это ваш предмет")
+    if o["price"] != exp: raise HTTPException(400, "Цена изменилась, обновите список")
+    if c.execute("UPDATE shop SET status='sold',buyer=? WHERE id=? AND status='open'", (uid, sid)).rowcount != 1:
+        raise HTTPException(400, "Уже куплено или снято с продажи")
+    item = json.loads(o["item"]); got = int(o["price"] * 0.95)
+    gift(c, uid, item); gift(c, o["seller"], {"t": "bal", "v": got}); c.commit(); _SHOP[0] = 0
+    notify(o["seller"], "💰 У вас купили!\n%s\nЦена: %s сум. Вам начислено %s сум (95%%). Покупатель: %s" % (item_txt(item), fnum(o["price"]), fnum(got), str(uname)[:30] or ("ID %d" % uid)), "💰 Открыть игру")
+    return {"ok": 1}
+
+@api("/api/shop/cancel")
+def shop_cancel(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: sid = int(b["id"])
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    o = c.execute("SELECT * FROM shop WHERE id=? AND status='open'", (sid,)).fetchone()
+    if not o or o["seller"] != uid: raise HTTPException(400, "Предмет недоступен")
+    if c.execute("UPDATE shop SET status='cancelled' WHERE id=? AND status='open'", (sid,)).rowcount != 1:
+        raise HTTPException(400, "Предмет уже куплен")
+    gift(c, uid, json.loads(o["item"])); c.commit(); _SHOP[0] = 0
+    return {"ok": 1}
 
 # эксклюзивные машины: их нельзя выбить в рулетке, они появляются только как системные лоты аукциона
 EXC = [("Rolls-Royce Spectre", 3.5), ("Lamborghini Aventador SVJ", 3.2), ("Ferrari 812 Superfast", 3), ("Bugatti Veyron", 4),
@@ -368,4 +659,117 @@ def system_lot(c):
         n, m = random.choice(EXC)
         item = {"t": "car", "v": {"n": n, "e": "🏎️", "t": 3, "m": m, "pl": None}}; start = int(30000000 * m * 0.5 / 1000) * 1000
     c.execute("INSERT INTO auctions(seller,item,start,end) VALUES(0,?,?,?)", (json.dumps(item, ensure_ascii=False), start, now + 600))
-    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('syslot',?)", (str(now),)); c.commit()
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('syslot',?)", (str(now),)); c.commit(); _AUC[0] = 0
+
+# ---------------------------------------------------------------- уход за базой: чистка, копии, проверка, отчёт
+def cleanup(c):   # раз в час: убрать старые закрытые обмены и торги, не раздувать базу
+    old = int(time.time()) - 14 * 86400; n = 0
+    n += c.execute("DELETE FROM offers WHERE id IN (SELECT id FROM offers WHERE status!='open' AND ts<? LIMIT 5000)", (old,)).rowcount
+    n += c.execute("DELETE FROM auctions WHERE id IN (SELECT id FROM auctions WHERE status!='open' AND end<? LIMIT 5000)", (old,)).rowcount
+    n += c.execute("DELETE FROM shop WHERE id IN (SELECT id FROM shop WHERE status!='open' AND ts<? LIMIT 5000)", (old,)).rowcount
+    c.commit()
+    c.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    if n: log.info("чистка базы: удалено старых записей: %d", n)
+
+def _backups():
+    try: return sorted(f for f in os.listdir(BK_DIR) if f.startswith("game-") and f.endswith(".db.gz"))
+    except OSError: return []
+
+def backup_db(tag="auto"):
+    """Копия базы (безопасная, пока игроки играют) со сжатием в папку backups рядом с базой. Возвращает путь к файлу."""
+    os.makedirs(BK_DIR, exist_ok=True)
+    size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+    free = shutil.disk_usage(BK_DIR).free
+    if free < size * 2.2 + 50e6: raise RuntimeError("мало места на диске (свободно %d МБ)" % (free // 1048576))
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    tmp = os.path.join(BK_DIR, "tmp-%s.db" % stamp); out = os.path.join(BK_DIR, "game-%s-%s.db.gz" % (stamp, tag))
+    src = sqlite3.connect(DB_PATH, timeout=30); dst = sqlite3.connect(tmp)
+    try: src.backup(dst, pages=2000, sleep=0.001)
+    finally: dst.close(); src.close()
+    try:
+        with open(tmp, "rb") as f, gzip.open(out + ".part", "wb", 6) as g: shutil.copyfileobj(f, g, 1 << 20)
+        os.replace(out + ".part", out)
+    finally:
+        for x in (tmp, out + ".part"):
+            try: os.remove(x)
+            except OSError: pass
+    for tagged, keep in ((True, BK_KEEP), (False, 5)):   # автокопий храним BK_KEEP, ручных и перед сбросом - 5
+        fs = [f for f in _backups() if f.endswith("-auto.db.gz") == tagged]
+        for f in fs[:-keep]:
+            try: os.remove(os.path.join(BK_DIR, f))
+            except OSError: pass
+    return out
+
+def auto_backup():   # не чаще раза в ~20 часов
+    fs = [f for f in _backups() if f.endswith("-auto.db.gz")]
+    if fs and time.time() - os.path.getmtime(os.path.join(BK_DIR, fs[-1])) < 20 * 3600: return
+    c = db()
+    if not c.execute("SELECT 1 FROM users LIMIT 1").fetchone(): return
+    p = backup_db("auto"); log.info("копия базы: %s (%d КБ)", os.path.basename(p), os.path.getsize(p) // 1024)
+
+DB_CHECK = ["ещё не проверялась", 0]
+def integrity():
+    r = db().execute("PRAGMA quick_check").fetchone()[0]
+    DB_CHECK[0] = r; DB_CHECK[1] = time.time()
+    if r != "ok": log.error("ПРОВЕРКА БАЗЫ НАШЛА ПРОБЛЕМУ: %s", r)
+    return r
+
+def _mb(n): return "%.1f МБ" % (n / 1048576)
+
+def db_report():   # текст для команды /stat в боте
+    c = db(); now = int(time.time()); out = []
+    one = lambda q, a=(): c.execute(q, a).fetchone()[0]
+    tot = one("SELECT COUNT(*) FROM users")
+    out.append("👥 Игроков: %d · за 24 ч: %d · за 7 дней: %d" % (tot, one("SELECT COUNT(*) FROM users WHERE last_seen>?", (now - 86400,)), one("SELECT COUNT(*) FROM users WHERE last_seen>?", (now - 7 * 86400,))))
+    sz = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0; wal = os.path.getsize(DB_PATH + "-wal") if os.path.exists(DB_PATH + "-wal") else 0
+    try: free = shutil.disk_usage(os.path.dirname(os.path.abspath(DB_PATH))).free
+    except OSError: free = 0
+    out.append("💾 База: %s (журнал %s) · свободно на диске: %s" % (_mb(sz), _mb(wal), _mb(free)))
+    big = c.execute("SELECT id,length(CAST(state AS BLOB)) l FROM users WHERE state IS NOT NULL ORDER BY l DESC LIMIT 1").fetchone()
+    avg = one("SELECT IFNULL(AVG(length(CAST(state AS BLOB))),0) FROM users WHERE state IS NOT NULL")
+    out.append("📦 Сохранение игрока: в среднем %d КБ, самое большое %d КБ (ID %s)" % (avg // 1024, (big["l"] if big else 0) // 1024, big["id"] if big else "-"))
+    out.append("🎁 Подарков в очереди: %d · 🤝 открытых обменов: %d · 🔨 открытых лотов: %d · 🔒 единственных номеров: %d · 🛒 на витрине: %d" % (
+        one("SELECT COUNT(*) FROM gifts"), one("SELECT COUNT(*) FROM offers WHERE status='open'"), one("SELECT COUNT(*) FROM auctions WHERE status='open'"), one("SELECT COUNT(*) FROM uniq"), one("SELECT COUNT(*) FROM shop WHERE status='open'")))
+    out.append("🧪 Проверка целостности: %s%s" % (DB_CHECK[0], (" (" + time.strftime("%d.%m %H:%M", time.gmtime(DB_CHECK[1])) + " UTC)") if DB_CHECK[1] else ""))
+    fs = _backups()
+    if fs:
+        p = os.path.join(BK_DIR, fs[-1]); out.append("🗄 Копий базы: %d · последняя: %s UTC (%s)" % (len(fs), time.strftime("%d.%m %H:%M", time.gmtime(os.path.getmtime(p))), _mb(os.path.getsize(p))))
+    else: out.append("🗄 Копий базы пока нет (первая создаётся автоматически; сделать сейчас: /backup)")
+    rows = [x for x in list(_LAT) if x[0] > time.time() - 300]
+    if rows:
+        ms = sorted(x[2] for x in rows); n = len(ms); pc = lambda q: ms[min(n - 1, int(n * q))]
+        out.append("⚡ За 5 минут: запросов %d (%.1f/сек) · ответ в среднем %d мс, 95%% быстрее %d мс, самый долгий %d мс, дольше 1 сек: %d" % (n, n / 300, sum(ms) / n, pc(.95), ms[-1], sum(1 for m in ms if m > 1000)))
+        by = {}
+        for _, p, m in rows: by.setdefault(p, []).append(m)
+        top = sorted(by.items(), key=lambda kv: -len(kv[1]))[:5]
+        out.append("   чаще всего: " + ", ".join("%s ×%d (%d мс)" % (p.replace("/api/", ""), len(v), sum(v) / len(v)) for p, v in top))
+    else: out.append("⚡ За 5 минут запросов не было")
+    return "\n".join(out)
+
+def _bg():   # фоновый поток: торги, системные лоты, чистка и копии (не зависит от нагрузки на сайт)
+    try: uniq_backfill()
+    except Exception: log.exception("uniq_backfill")
+    for f in os.listdir(BK_DIR) if os.path.isdir(BK_DIR) else []:
+        if f.startswith("tmp-") or f.endswith(".part"):
+            try: os.remove(os.path.join(BK_DIR, f))
+            except OSError: pass
+    last_clean = last_bk = last_chk = 0
+    while True:
+        try: c = db(); settle(c); system_lot(c)
+        except Exception: log.exception("торги")
+        t = time.time()
+        if t - last_clean > 3600:
+            last_clean = t
+            try: cleanup(db())
+            except Exception: log.exception("чистка базы")
+        if t - last_bk > 3600:
+            last_bk = t
+            try: auto_backup()
+            except Exception: log.exception("копия базы")
+        if t - last_chk > 86400:
+            last_chk = t
+            try: integrity()
+            except Exception: log.exception("проверка базы")
+        time.sleep(5)
+
+if not os.environ.get("NO_BG"): threading.Thread(target=_bg, daemon=True, name="bg").start()

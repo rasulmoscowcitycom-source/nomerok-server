@@ -1,9 +1,9 @@
 # Запуск (в той же папке, что server.py):  python bot.py
-import json, time, sqlite3, shutil
+import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL
+from server import db, gift, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -104,9 +104,11 @@ async def post_init(app):
 
 @admin
 async def players(u, ctx):
-    rows = db().execute("SELECT id,name,state FROM users ORDER BY last_seen DESC").fetchall()
-    out = [f"Игроков: {len(rows)}"]
-    for r in rows[:40]:
+    c = db()
+    total = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    rows = c.execute("SELECT id,name,state FROM users ORDER BY last_seen DESC LIMIT 40").fetchall()
+    out = [f"Игроков: {total} (показаны последние 40)"]
+    for r in rows:
         s = json.loads(r["state"] or "{}")
         out.append(f'{r["id"]} {r["name"]} · ур.{s.get("lv",1)} · {s.get("bal",0):,} сум · машин {len(s.get("cars",[]))}')
     await u.message.reply_text("\n".join(out))
@@ -200,9 +202,12 @@ async def promo(u, ctx):
 @admin
 async def find(u, ctx):  # /find имя или ID - найти игрока и его ID
     q = " ".join(ctx.args).lower()
-    rows = [r for r in db().execute("SELECT id,name,state FROM users") if q and (q in (r["name"] or "").lower() or q == str(r["id"]))]
+    if not q: return await u.message.reply_text("Использование: /find имя или ID")
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    c = db(); c.create_function("pylower", 1, lambda x: (x or "").lower())  # LOWER() в SQLite не знает кириллицу
+    rows = c.execute("SELECT id,name,state FROM users WHERE CAST(id AS TEXT)=? OR pylower(name) LIKE ? ESCAPE '\\' LIMIT 20", (q, like)).fetchall()
     out = []
-    for r in rows[:20]:
+    for r in rows:
         s = json.loads(r["state"] or "{}")
         out.append(f'{r["id"]} {r["name"]} · ур.{s.get("lv",1)} · {s.get("bal",0):,} сум · номеров {len(s.get("col",[]))} · машин {len(s.get("cars",[]))}')
     await u.message.reply_text("\n".join(out) or "Не найдено. Использование: /find имя или ID")
@@ -212,14 +217,29 @@ async def resetall(u, ctx):  # /resetall CONFIRM - сбросить прогре
     if ctx.args != ["CONFIRM"]:
         return await u.message.reply_text("⚠️ Это сотрёт прогресс ВСЕХ игроков (баланс, номера, машины, лоты, подарки, обмены, приглашения, использованные промокоды). "
                                           "Игроки, их ID, промокоды и платежи останутся. Перед сбросом делается копия базы.\n\nПодтвердите: /resetall CONFIRM")
-    shutil.copy(DB_PATH, f"game-backup-{int(time.time())}.db")
+    try: bk = backup_db("resetall")
+    except Exception as e: return await u.message.reply_text(f"❌ Не удалось сделать копию базы ({e}). Сброс отменён.")
     c = db(); rid = get_rid(c) + 1
     c.execute("CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id))")
     for q in ("UPDATE users SET state=NULL", "DELETE FROM uniq", "DELETE FROM gifts", "DELETE FROM offers", "DELETE FROM auctions", "DELETE FROM referrals",
               "DELETE FROM refpending", "DELETE FROM redeemed", "UPDATE promos SET used=0", "DELETE FROM claims", "DELETE FROM events"):
         c.execute(q)
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rid',?)", (str(rid),)); c.commit()
-    await u.message.reply_text(f"✅ Прогресс всех игроков сброшен (сезон {rid}). Копия базы сохранена. У всех игра начнётся заново при следующем открытии.")
+    await u.message.reply_text(f"✅ Прогресс всех игроков сброшен (сезон {rid}). Копия базы сохранена (/backup пришлёт свежую). У всех игра начнётся заново при следующем открытии.")
+
+@admin
+async def stat(u, ctx):  # /stat - здоровье сервера и базы
+    await u.message.reply_text(db_report())
+
+@admin
+async def backup(u, ctx):  # /backup - сделать копию базы и прислать файл сюда
+    try: path = backup_db("manual")
+    except Exception as e: return await u.message.reply_text(f"❌ Копия не создалась: {e}")
+    size = os.path.getsize(path)
+    if size > 49 * 1024 * 1024:
+        return await u.message.reply_text(f"✅ Копия сохранена на сервере ({size // 1048576} МБ), но для Telegram слишком большая: {path}")
+    with open(path, "rb") as f:
+        await u.message.reply_document(f, filename=os.path.basename(path), caption="Копия базы игры (gzip). Сохраните этот файл.")
 
 @admin
 async def reset(u, ctx):  # /reset ID - сбросить прогресс одного игрока
@@ -258,6 +278,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
