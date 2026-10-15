@@ -157,12 +157,14 @@ async def addbal(u, ctx):  # /addbal ID СУММА - пополнить бала
 @admin
 async def broadcast(u, ctx):  # /broadcast текст - рассылка всем игрокам
     import asyncio
-    text = " ".join(ctx.args)
+    parts = (u.message.text or "").split(None, 1)
+    text = parts[1] if len(parts) > 1 else ""
     if not text: return await u.message.reply_text("Использование: /broadcast текст сообщения")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎰 Играть", web_app=WebAppInfo(url=URL))]])
     ids = [r["id"] for r in db().execute("SELECT id FROM users")]
     ok = bad = 0
     for i in ids:
-        try: await ctx.bot.send_message(i, text); ok += 1
+        try: await ctx.bot.send_message(i, text, reply_markup=kb); ok += 1
         except Exception: bad += 1
         await asyncio.sleep(0.06)
     await u.message.reply_text(f"Рассылка: доставлено {ok}, не доставлено {bad}")
@@ -207,6 +209,23 @@ async def resetall(u, ctx):  # /resetall CONFIRM - сбросить прогре
     await u.message.reply_text(f"✅ Прогресс всех игроков сброшен (сезон {rid}). Копия базы сохранена. У всех игра начнётся заново при следующем открытии.")
 
 @admin
+async def reset(u, ctx):  # /reset ID - сбросить прогресс одного игрока
+    try: uid = int(ctx.args[0])
+    except Exception: return await u.message.reply_text("Использование: /reset ID\nНайти ID: /find имя")
+    c = db()
+    row = c.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+    if not row: return await u.message.reply_text("Игрок с таким ID не найден")
+    c.execute("CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id))")
+    c.execute("DELETE FROM gifts WHERE uid=?", (uid,))
+    c.execute("DELETE FROM offers WHERE frm=? OR to_id=?", (uid, uid))
+    c.execute("DELETE FROM auctions WHERE seller=? AND status='open'", (uid,))
+    c.execute("DELETE FROM claims WHERE uid=?", (uid,))
+    c.execute("DELETE FROM redeemed WHERE uid=?", (uid,))
+    c.execute("UPDATE users SET state=NULL WHERE id=?", (uid,))
+    gift(c, uid, {"t": "reset"}); c.commit()
+    await u.message.reply_text(f"✅ Прогресс игрока {row['name']} ({uid}) сброшен. У него игра начнётся заново при следующем заходе (до 15 сек).")
+
+@admin
 async def event(u, ctx):
     a = ctx.args; c = db()
     if a and a[0] == "stop":
@@ -225,6 +244,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("broadcast", broadcast)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("reset", reset), ("broadcast", broadcast)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
