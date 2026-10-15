@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: uz-nomerok
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python start.py
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /data/game.db
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMINS
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: BOT_USERNAME
+        sync: false
+      - key: REQUIRED_CHANNEL
+        sync: false
+      - key: REQUIRED_URL
+        sync: false
+      - key: CHANNEL1
+        sync: false
+      - key: CHANNEL2
+        sync: false
+      - key: CHANNEL_URL
+        sync: false
+      - key: SUPPORT
+        sync: false
