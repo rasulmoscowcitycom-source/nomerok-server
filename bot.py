@@ -170,6 +170,19 @@ async def broadcast(u, ctx):  # /broadcast текст - рассылка все�
     await u.message.reply_text(f"Рассылка: доставлено {ok}, не доставлено {bad}")
 
 @admin
+async def uniq(u, ctx):  # /uniq - список единственных номеров; /uniq free ID - освободить все номера игрока
+    c = db()
+    if ctx.args[:1] == ["free"] and len(ctx.args) == 2:
+        n = c.execute("DELETE FROM uniq WHERE owner=?", (int(ctx.args[1]),)).rowcount; c.commit()
+        return await u.message.reply_text(f"Освобождено единственных номеров: {n}")
+    rows = c.execute("SELECT u.key,u.owner,x.name FROM uniq u LEFT JOIN users x ON x.id=u.owner ORDER BY u.ts DESC LIMIT 25").fetchall()
+    tot = c.execute("SELECT COUNT(*) FROM uniq").fetchone()[0]
+    def fmt(k):
+        kk, r, a, d, z = k.split("|"); return f"{r} {a+' ' if a else ''}{d} {z}" + (" (фирма)" if kk == "1" else "")
+    await u.message.reply_text(f"Единственных номеров занято: {tot}\n" + "\n".join(f"{fmt(x['key'])} - {x['name'] or ''} ({x['owner']})" for x in rows) +
+                               "\n\n/uniq free ID - освободить все номера игрока")
+
+@admin
 async def promo(u, ctx):
     a = ctx.args; c = db()
     if a and a[0] == "add" and len(a) == 4:      # /promo add CODE СУММА КОЛ-ВО
@@ -202,7 +215,7 @@ async def resetall(u, ctx):  # /resetall CONFIRM - сбросить прогре
     shutil.copy(DB_PATH, f"game-backup-{int(time.time())}.db")
     c = db(); rid = get_rid(c) + 1
     c.execute("CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id))")
-    for q in ("UPDATE users SET state=NULL", "DELETE FROM gifts", "DELETE FROM offers", "DELETE FROM auctions", "DELETE FROM referrals",
+    for q in ("UPDATE users SET state=NULL", "DELETE FROM uniq", "DELETE FROM gifts", "DELETE FROM offers", "DELETE FROM auctions", "DELETE FROM referrals",
               "DELETE FROM refpending", "DELETE FROM redeemed", "UPDATE promos SET used=0", "DELETE FROM claims", "DELETE FROM events"):
         c.execute(q)
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rid',?)", (str(rid),)); c.commit()
@@ -216,6 +229,7 @@ async def reset(u, ctx):  # /reset ID - сбросить прогресс одн
     row = c.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
     if not row: return await u.message.reply_text("Игрок с таким ID не найден")
     c.execute("CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id))")
+    c.execute("DELETE FROM uniq WHERE owner=?", (uid,))
     c.execute("DELETE FROM gifts WHERE uid=?", (uid,))
     c.execute("DELETE FROM offers WHERE frm=? OR to_id=?", (uid, uid))
     c.execute("DELETE FROM auctions WHERE seller=? AND status='open'", (uid,))
@@ -244,6 +258,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("reset", reset), ("broadcast", broadcast)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()

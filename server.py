@@ -28,6 +28,7 @@ def db():
     CREATE TABLE IF NOT EXISTS referrals(uid INTEGER PRIMARY KEY,ref INT);
     CREATE TABLE IF NOT EXISTS events(name TEXT,luck REAL,sell REAL,xp REAL,until INT);
     CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT);
+    CREATE TABLE IF NOT EXISTS uniq(key TEXT PRIMARY KEY,owner INT,ts INT);
     CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open');
     """)
     return c
@@ -40,7 +41,90 @@ def auth(init):  # проверка подписи Telegram initData
         raise HTTPException(401, "Нет доступа")
     u = json.loads(d["user"]); return u["id"], u.get("first_name", "")
 
-def gift(c, uid, d): c.execute("INSERT INTO gifts(uid,data) VALUES(?,?)", (uid, json.dumps(d)))
+# ---------- единственные экземпляры: Мифик и Секретный номера есть только у одного игрока ----------
+SPSER = {"UZB", "AAA", "SBA"}
+SPX = [(1, "879", "MEA", ""), (1, "762", "MMA", ""), (1, "500", "SOO", ""), (0, "777", "ZZ", "Z"), (0, "001", "OO", "O")]
+SSX = {"PAA": 4, "PSS": 4, "PPP": 3, "APC": 3, "TSS": 3, "TST": 3, "ZDF": 3, "DXA": 2, "FVV": 2, "VSB": 2, "VSC": 2, "VSF": 2, "VSD": 2, "VSG": 2, "VSV": 2, "PSF": 2,
+       "TTA": 1, "TTB": 1, "TTC": 1, "TTD": 1, "TTE": 1, "TTF": 1, "TTG": 1}
+
+def tier_py(p):  # то же, что tier() в игре
+    try: k = int(p["k"]); r = str(p["r"]); d = str(p["d"]); z = str(p["z"]); a = str(p.get("a") or "")
+    except Exception: return 0
+    if r == "01" and any(x[0] == k and x[1] == d and x[2] == z and x[3] == a for x in SPX): return 5
+    if k and (z in SPSER or (r == "01" and d == "007" and z == "AUB")): return 5
+    if k and z in SSX: return SSX[z]
+    if len(d) != 3 or len(z) < 2: return 0
+    sc = 0
+    if d[0] == d[1] == d[2]: sc += 4
+    elif d in ("123", "321", "456", "789", "007", "100") or d[1:] == "00": sc += 3
+    elif d[0] == d[2]: sc += 1
+    if z[0] == z[1]: sc += 1
+    if len(z) > 2 and z[1] == z[2]: sc += 1
+    if r == "01": sc += 1
+    return 4 if sc >= 6 else 3 if sc >= 5 else 2 if sc >= 3 else 1 if sc >= 2 else 0
+
+def ukey(p): return "%s|%s|%s|%s|%s" % (p.get("k"), p.get("r"), p.get("a") or "", p.get("d"), p.get("z"))
+def is_uniq(p): return isinstance(p, dict) and tier_py(p) >= 4
+
+def uniq_set(c, uid, p):
+    c.execute("INSERT OR REPLACE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time())))
+
+def gift(c, uid, d):
+    c.execute("INSERT INTO gifts(uid,data) VALUES(?,?)", (uid, json.dumps(d)))
+    try:   # номер/машина с номером: единственный экземпляр переходит получателю
+        if d.get("t") == "plate" and is_uniq(d.get("v")): uniq_set(c, uid, d["v"])
+        elif d.get("t") == "car" and is_uniq((d.get("v") or {}).get("pl")): uniq_set(c, uid, d["v"]["pl"])
+    except Exception: pass
+
+def clean_plate(p):
+    try: k = int(p["k"]); r = str(p["r"]); d = str(p["d"]); z = str(p["z"]).upper(); a = str(p.get("a") or "").upper()
+    except Exception: raise HTTPException(400, "Неверный номер")
+    return {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
+
+@app.post("/api/uclaim")
+async def uclaim(r: Request):   # игрок выбил номер: если это Мифик/Секретный - закрепить его за собой, если свободен
+    b = await r.json(); uid, _ = auth(b["initData"]); p = clean_plate(b.get("p") or {}); c = db()
+    if tier_py(p) < 4: return {"ok": 1, "free": 1}
+    row = c.execute("SELECT owner FROM uniq WHERE key=?", (ukey(p),)).fetchone()
+    if row and row["owner"] != uid: return {"ok": 0, "taken": 1}
+    if not row:
+        try: uniq_set(c, uid, p); c.commit()
+        except sqlite3.IntegrityError: return {"ok": 0, "taken": 1}
+    return {"ok": 1}
+
+@app.post("/api/urel")
+async def urel(r: Request):   # игрок продал уникальный номер магазину - он снова может выпасть
+    b = await r.json(); uid, _ = auth(b["initData"]); p = clean_plate(b.get("p") or {}); c = db()
+    c.execute("DELETE FROM uniq WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()
+    return {"ok": 1}
+
+@app.post("/api/ucheck")
+async def ucheck(r: Request):   # проверить номер: редкость, занят ли
+    b = await r.json(); uid, _ = auth(b["initData"]); p = clean_plate(b.get("p") or {}); c = db(); t = tier_py(p)
+    row = c.execute("SELECT owner FROM uniq WHERE key=?", (ukey(p),)).fetchone() if t >= 4 else None
+    own = None
+    if row:
+        u = c.execute("SELECT name FROM users WHERE id=?", (row["owner"],)).fetchone(); own = (u["name"] if u else "игрок") if row["owner"] != uid else "вы"
+    return {"tier": t, "unique": t >= 4, "taken": bool(row), "owner": own}
+
+@app.get("/api/ustats")
+def ustats():
+    c = db(); n = {4: 0, 5: 0}
+    for x in c.execute("SELECT key FROM uniq").fetchall():
+        k, r, a, d, z = x["key"].split("|"); t = tier_py({"k": int(k), "r": r, "a": a, "d": d, "z": z})
+        if t in n: n[t] += 1
+    return {"myth": n[4], "secret": n[5]}
+
+def uniq_backfill():   # один раз при запуске: записать за игроками их Мифик/Секретные номера
+    c = db()
+    if c.execute("SELECT 1 FROM meta WHERE k='uniq_bf'").fetchone(): return
+    for u in c.execute("SELECT id,state FROM users WHERE state IS NOT NULL").fetchall():
+        try: st = json.loads(u["state"])
+        except Exception: continue
+        pls = list(st.get("col") or []) + [x.get("pl") for x in (st.get("cars") or []) if x.get("pl")]
+        for p in pls:
+            if is_uniq(p) and not c.execute("SELECT 1 FROM uniq WHERE key=?", (ukey(p),)).fetchone(): uniq_set(c, u["id"], p)
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('uniq_bf','1')"); c.commit()
 
 @app.get("/")
 def index(): return FileResponse("uz-nomerok-tg.html")
@@ -176,6 +260,7 @@ def check_plate(p):  # проверка номера, который игрок 
     bad = r not in REGS or not (d.isdigit() and len(d) == 3) or d == "000" or not z or not set(z) <= LETTERS
     if k == 1: bad = bad or len(z) != 3
     else: bad = bad or len(z) != 2 or len(a) != 1 or a not in LETTERS
+    if not bad and tier_py({"k": k, "r": r, "d": d, "z": z, "a": a}) >= 4: bad = True   # Мифик и Секретные номера купить нельзя - они единственные
     if bad or (a + z) in BLOCK or z in BLOCK or (k == 0 and r == "01" and a == "R" and d == "700" and z == "TT"):
         raise HTTPException(400, "Этот номер купить нельзя")
     return {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
@@ -215,6 +300,8 @@ async def _auction_loop():
             await asyncio.sleep(5)
             try: c = db(); settle(c); system_lot(c)
             except Exception: pass
+    try: uniq_backfill()
+    except Exception: pass
     asyncio.create_task(loop())
 
 def next_price(a): return a["start"] if not a["topuid"] else math.ceil(a["top"] * 1.05)
@@ -273,8 +360,9 @@ def system_lot(c):
     if c.execute("SELECT 1 FROM auctions WHERE seller=0 AND status='open'").fetchone(): return
     r = c.execute("SELECT v FROM meta WHERE k='syslot'").fetchone()
     if r and now - int(r[0]) < SYSLOT_EVERY: return
-    if random.random() < 0.25:   # супер-лот ~1 млрд: Аюб или Бибиша
-        n, pl = random.choice(ULTRA)
+    free = [u for u in ULTRA if not is_uniq(u[1]) or not c.execute("SELECT 1 FROM uniq WHERE key=?", (ukey(u[1]),)).fetchone()]
+    if free and random.random() < 0.25:   # супер-лот ~1 млрд: Аюб или Бибиша (если их номер ещё ни у кого нет)
+        n, pl = random.choice(free)
         item = {"t": "car", "v": {"n": n, "e": "🚙", "t": 4, "m": 2, "pl": pl}}; start = 600_000_000
     else:
         n, m = random.choice(EXC)
