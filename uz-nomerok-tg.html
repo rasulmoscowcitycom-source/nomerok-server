@@ -98,14 +98,18 @@ function mk(k,reg,t){var r=reg||RK[rnd(RK.length)],a=lt(),b=lt(),d,x=1+rnd(9);
  if(t==4&&!k&&!reg)r="01";
  if(t==4&&!reg&&Math.random()<.3)r="01";if(t==3&&!reg&&r=="01")r=RK[1+rnd(RK.length-1)];
  return k?{k:1,r:r,d:d,z:t>=3?b+b+(t==4?b:lt()):a+b+lt()}:{k:0,r:r,a:a,d:d,z:t>=3?b+b:lt()+lt()}}
-function luck(k,reg){var m=M[mode],best=null,bv=-1;bst=m.boost*(st.luck?2:1)+(st.luck?.16:0);LK=1;for(var i=0;i<m.tries*(st.luck?2:1);i++){var p=gen(k,reg),v=tier(p)*10+score(p);if(v>bv){bv=v;best=p}}bst=0;LK=0;var q=Math.random(),Lx=lx();if(mode<2)q/=Lx*(st.luck?1.5:1);else q=1-(1-q)/Lx;var tt=mode==2?(q<.05?2:q<.925?3:4):mode==1?(q<.012?4:q<.2?3:q<.5?2:0):(q<.005?3:q<.08?2:0);if(tt&&tier(best)<tt)best=mk(k,reg,tt);return best}
+function luck(k,reg){var m=M[mode],best=null,bv=-1;bst=m.boost*(st.luck?2:1)+(st.luck?.16:0);LK=1;for(var i=0;i<m.tries*(st.luck?2:1);i++){var p=gen(k,reg),v=tier(p)*10+score(p);if(v>bv){bv=v;best=p}}bst=0;LK=0;var q=Math.random(),Lx=lx();if(mode<2)q/=Lx*(st.luck?1.5:1);else q=1-(1-q)/Lx;var tt=mode==2?(q<.05?2:q<.985?3:4):mode==1?(q<.012?4:q<.2?3:q<.5?2:0):(q<.005?3:q<.08?2:0);if(tt&&tier(best)<tt)best=mk(k,reg,tt);return pity(best,k,reg)}
+function pity(best,k,reg){if(mode<1)return best;if(!st.dry)st.dry=[0,0,0];var lim=mode==2?80:140,big=tier(best)>=4,h=st.hh||0;
+if(big&&st.dry[mode]<lim*.6&&Math.random()<Math.min(.95,h*2)){best=mk(k,reg,3);big=tier(best)>=4}
+if(!big&&st.dry[mode]>=lim*(.8+Math.random()*.4)){best=mk(k,reg,4);big=true}
+if(big){st.dry[mode]=0;st.hh=h*.9+1}else{st.dry[mode]++;st.hh=h*.97}return best}
 function rnd(n){return Math.floor(Math.random()*n)}function lt(){return L[rnd(L.length)]}
 function gen(k,reg){
  var d,r=reg||RK[rnd(RK.length)];
  if(Math.random()<.04+bst*.25){var x=1+rnd(9);d=[""+x+x+x,"00"+(1+rnd(9)),(1+rnd(9))+"00","123","777"][rnd(5)]}else d=(""+(1001+rnd(999))).slice(1);
  if(!reg&&Math.random()<.02)r="01";
  var a=lt(),b=lt(),c=Math.random()<.03?b:lt();
- var sp=Math.random()<.0007+bst*.012?SP[rnd(3)]:null,o=k?{k:1,r:r,d:d,z:a+b+c}:{k:0,r:r,a:a,d:d,z:b+(Math.random()<.04?b:c)};if(sp){if(k)o.z=sp;else{o.a=sp[0];o.z=sp.slice(1)}}if(k&&LK&&(!reg||reg=="01")&&Math.random()<.0006+bst*.002){o.r="01";o.d="007";o.z="AUB"}else if(!k&&LK&&(!reg||reg=="01")&&Math.random()<.0006+bst*.002){o.r="01";o.a="R";o.d="700";o.z="TT"}else if(k&&LK&&mode>0&&Math.random()<.012+bst*.015)o.z=ss();return o;
+ var sp=Math.random()<.0007+bst*.012?SP[rnd(3)]:null,o=k?{k:1,r:r,d:d,z:a+b+c}:{k:0,r:r,a:a,d:d,z:b+(Math.random()<.04?b:c)};if(sp){if(k)o.z=sp;else{o.a=sp[0];o.z=sp.slice(1)}}if(k&&LK&&(!reg||reg=="01")&&Math.random()<.0006+bst*.002){o.r="01";o.d="007";o.z="AUB"}else if(!k&&LK&&(!reg||reg=="01")&&Math.random()<.0006+bst*.002){o.r="01";o.a="R";o.d="700";o.z="TT"}else if(k&&LK&&mode>0&&Math.random()<.004+bst*.006)o.z=ss();return o;
 }
 function score(p){var d=p.d,z=p.z,s=0;
  if(d[0]==d[1]&&d[1]==d[2])s+=4;else if("123 321 456 789 007 100".indexOf(d)>=0||d.slice(1)=="00")s+=3;else if(d[0]==d[2])s+=1;
