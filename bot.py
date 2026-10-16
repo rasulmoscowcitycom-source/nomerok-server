@@ -75,12 +75,13 @@ async def paid(u: Update, ctx):  # оплата звёздами прошла - 
 
 @admin
 async def stars(u, ctx):  # /stars - сколько звёзд получено
-    rows = db().execute("SELECT item, COUNT(*) n, SUM(stars) s FROM payments GROUP BY item").fetchall()
-    await u.message.reply_text("\n".join(f'{r["item"]}: {r["n"]} шт · {r["s"]} ⭐' for r in rows) or "Платежей пока нет")
+    c = db(); rows = c.execute("SELECT item, COUNT(*) n, SUM(stars) s FROM payments WHERE charge NOT LIKE 'wallet:%' GROUP BY item").fetchall()   # реальные платежи Telegram (покупки со звёздного баланса не считаем)
+    tot = sum(r["s"] or 0 for r in rows); held = c.execute("SELECT COALESCE(SUM(stars),0) FROM users").fetchone()[0]
+    await u.message.reply_text(("\n".join(f'{r["item"]}: {r["n"]} шт · {r["s"]} ⭐' for r in rows) or "Платежей пока нет") + f"\n\nВсего получено: {tot} ⭐\nСейчас лежит на звёздных балансах игроков: {held} ⭐")
 
 @admin
 async def lastpay(u, ctx):  # /lastpay - последние платежи и сколько подарков ещё ждут игрока (диагностика оплаты)
-    c = db(); rows = c.execute("SELECT charge,uid,item,stars,ts FROM payments ORDER BY ts DESC LIMIT 8").fetchall()
+    c = db(); rows = c.execute("SELECT charge,uid,item,stars,ts FROM payments WHERE charge NOT LIKE 'wallet:%' ORDER BY ts DESC LIMIT 8").fetchall()
     if not rows: await u.message.reply_text("Платежей пока нет: бот ещё ни разу не получал оплату."); return
     out = []
     for r in rows:
@@ -176,6 +177,16 @@ async def takebal(u, ctx):  # /takebal ID СУММА (или all) - списат
     if n <= 0: return await u.message.reply_text("Сумма должна быть больше нуля")
     gift(c, uid, {"t": "bal", "v": -n}); c.commit()
     await u.message.reply_text(f"У игрока {row['name']} ({uid}) спишется {n:,} сум (сейчас у него {have:,}). Спишется при его следующем заходе (до 45 сек), баланс не уйдёт ниже нуля.")
+
+@admin
+async def addstars(u, ctx):  # /addstars ID N - выдать (или списать, если N<0) звёзды на звёздном балансе игрока
+    try: uid = int(ctx.args[0]); n = int(ctx.args[1])
+    except Exception: return await u.message.reply_text("Использование: /addstars ID N (N со знаком минус - списать)\nНайти ID: /find имя")
+    c = db(); row = c.execute("SELECT name,COALESCE(stars,0) s FROM users WHERE id=?", (uid,)).fetchone()
+    if not row: return await u.message.reply_text("Игрок с таким ID не найден")
+    new = max(0, row["s"] + n); c.execute("UPDATE users SET stars=? WHERE id=?", (new, uid))
+    c.execute("INSERT INTO wlog(uid,d,why,ts) VALUES(?,?,?,?)", (uid, new - row["s"], "admin", int(time.time()))); c.commit()
+    await u.message.reply_text(f"Звёздный баланс игрока {row['name']} ({uid}): {row['s']} → {new} ⭐")
 
 @admin
 async def broadcast(u, ctx):  # /broadcast текст - рассылка всем игрокам
@@ -299,6 +310,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()

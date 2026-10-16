@@ -70,6 +70,11 @@ def init_db():   # один раз при запуске: таблицы, инд
         c.execute("PRAGMA journal_mode=WAL"); c.executescript(SCHEMA)
         try: c.execute("ALTER TABLE users ADD COLUMN bal INT DEFAULT 0")
         except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE users ADD COLUMN stars INT DEFAULT 0")   # звёздный кошелёк игрока (хранится на сервере)
+        except sqlite3.OperationalError: pass
+        c.execute("CREATE TABLE IF NOT EXISTS wlog(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,d INT,why TEXT,ts INT)")
+        c.execute("CREATE TABLE IF NOT EXISTS star_auc(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open')")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_sa_status ON star_auc(status,end)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_users_bal ON users(bal)"); c.execute("CREATE INDEX IF NOT EXISTS ix_pay_uid ON payments(uid)"); c.commit()
     finally: c.close()
 
@@ -375,7 +380,21 @@ def top(b):
         me = {"rank": rk, "bal": mb}
     return {"list": out, "me": me}
 
-def stars_of(c, uid): return c.execute("SELECT COALESCE(SUM(stars),0) FROM payments WHERE uid=?", (uid,)).fetchone()[0]
+def wallet_of(c, uid):
+    r = c.execute("SELECT COALESCE(stars,0) FROM users WHERE id=?", (uid,)).fetchone()
+    return int(r[0]) if r else 0
+
+def wadd(c, uid, n, why):
+    c.execute("UPDATE users SET stars=COALESCE(stars,0)+? WHERE id=?", (int(n), uid))
+    c.execute("INSERT INTO wlog(uid,d,why,ts) VALUES(?,?,?,?)", (uid, int(n), why, int(time.time())))
+
+def wspend(c, uid, n, why):   # списать звёзды атомарно: не получится - ничего не меняется
+    n = int(n)
+    if n <= 0 or c.execute("UPDATE users SET stars=stars-? WHERE id=? AND COALESCE(stars,0)>=?", (n, uid, n)).rowcount != 1:
+        c.rollback(); raise HTTPException(400, "Не хватает ⭐ на звёздном балансе. Пополните баланс")
+    c.execute("INSERT INTO wlog(uid,d,why,ts) VALUES(?,?,?,?)", (uid, -n, why, int(time.time())))
+
+def stars_of(c, uid): return wallet_of(c, uid)
 
 @api("/api/load")
 def load(b):
@@ -589,7 +608,9 @@ STAR_ITEMS = {  # item: (звёзды, название, описание)
 
 # ---------------------------------------------------------------- звёзды: пополнение баланса и «звёздная крутка» (единственные номера)
 STAR_RATE = int(os.environ.get("STAR_RATE", "1000000"))   # сколько сум даём за 1 ⭐ (можно поменять в настройках Render: STAR_RATE)
-STAR_MIN, STAR_MAX = 50, 5000                              # пополнение баланса: от 50 ⭐
+STAR_MIN, STAR_MAX = 50, 5000
+WALLET_MIN, WALLET_MAX = 10, 10000                         # пополнение звёздного баланса
+SA_FEE, SA_MIN = 5, 10                                    # комиссия звёздного аукциона (%) и минимальная стартовая ставка (⭐)                              # пополнение баланса: от 50 ⭐
 STAR_BONUS = [(1000, 25), (250, 10)]                       # от 250 ⭐ +10%, от 1000 ⭐ +25%
 SPIN_PRICE = 15                                            # одна звёздная крутка = 15 ⭐
 SPIN_PACKS = (1, 5, 10)
@@ -606,7 +627,7 @@ def star_sum(stars):
 def stars_info(b):
     auth(b.get("initData"))
     return {"rate": STAR_RATE, "min": STAR_MIN, "max": STAR_MAX, "bonus": [[lim, p] for lim, p in STAR_BONUS], "spin": SPIN_PRICE,
-            "packs": list(SPIN_PACKS), "secret": 100 - int(SPIN_MYTHIC * 100) - int(SPIN_PAA * 100), "mythic": int(SPIN_MYTHIC * 100), "paa": int(SPIN_PAA * 100)}
+            "packs": list(SPIN_PACKS), "secret": 100 - int(SPIN_MYTHIC * 100) - int(SPIN_PAA * 100), "mythic": int(SPIN_MYTHIC * 100), "paa": int(SPIN_PAA * 100), "wmin": WALLET_MIN, "wmax": WALLET_MAX, "samin": SA_MIN, "safee": SA_FEE}
 
 _PLR = ["01", "10", "20", "25", "30", "40", "50", "60", "70", "75", "80", "85", "90", "95"]
 _ULTRA = [{"k": 1, "r": "01", "d": "879", "z": "MEA"}, {"k": 1, "r": "01", "d": "762", "z": "MMA"}, {"k": 1, "r": "01", "d": "500", "z": "SOO"},
@@ -659,6 +680,10 @@ def apply_payment(c, d, total, charge):
     elif item == "b100":
         for k in ("bl", "bx", "bs"): gift(c, uid, {"t": "boost", "k": k, "v": 120})
     elif item == "noads": gift(c, uid, {"t": "noads"})
+    elif item == "wallet":
+        st = int(d.get("s", 0))
+        if st != total or not (WALLET_MIN <= st <= WALLET_MAX): log.error("платёж wallet: сумма не сходится %s %s", st, total); c.commit(); return None
+        wadd(c, uid, st, "topup"); msg = "⭐ Звёздный баланс пополнен на %d ⭐. Тратьте их в игре." % st
     elif item == "p500": gift(c, uid, {"t": "plate", "v": d["p"]})
     elif item == "bal":
         st = int(d.get("s", 0))
@@ -696,6 +721,11 @@ def invoice(b):
         except (TypeError, ValueError): raise HTTPException(400, "Неверная сумма")
         if not (STAR_MIN <= stars <= STAR_MAX): raise HTTPException(400, "Пополнение от %d до %d ⭐" % (STAR_MIN, STAR_MAX))
         amount, title, desc = stars, "Пополнение баланса", "%s сум на игровой баланс" % fnum(star_sum(stars)); payload = {"u": uid, "i": item, "s": stars}
+    elif item == "wallet":
+        try: stars = int(b.get("s", 0))
+        except (TypeError, ValueError): raise HTTPException(400, "Неверная сумма")
+        if not (WALLET_MIN <= stars <= WALLET_MAX): raise HTTPException(400, "Пополнение от %d до %d ⭐" % (WALLET_MIN, WALLET_MAX))
+        amount, title, desc = stars, "Звёздный баланс", "Пополнение звёздного баланса на %d ⭐ — тратьте в игре" % stars; payload = {"u": uid, "i": item, "s": stars}
     elif item == "spin":
         try: n = int(b.get("n", 0))
         except (TypeError, ValueError): raise HTTPException(400, "Неверное количество")
@@ -803,6 +833,113 @@ def auc_cancel(b):   # продавец снимает свой лот, если
     if c.execute("UPDATE auctions SET status='cancelled' WHERE id=? AND status='open' AND topuid IS NULL", (aid,)).rowcount != 1:
         raise HTTPException(400, "На лот уже сделали ставку, снять нельзя")
     gift(c, uid, json.loads(a["item"])); c.commit(); _AUC[0] = 0
+    return {"ok": 1}
+
+# ---------------------------------------------------------------- покупки за звёздный баланс
+@api("/api/wbuy")
+def wbuy(b):
+    """Купить что-то за ⭐ со звёздного баланса (пополнение баланса - отдельная оплата через Telegram)."""
+    uid, _ = auth(b.get("initData")); c = db(); item = b.get("item"); d = {"u": uid, "i": item}
+    if item == "spin":
+        try: n = int(b.get("n", 0))
+        except (TypeError, ValueError): raise HTTPException(400, "Неверное количество")
+        if n not in SPIN_PACKS: raise HTTPException(400, "Неверное количество")
+        reg = str(b.get("reg") or "")
+        if reg and reg not in _PLR: raise HTTPException(400, "Неверный регион")
+        price = n * SPIN_PRICE; d["n"] = n
+        if reg: d["g"] = reg
+    elif item == "p500": d["p"] = check_plate(b.get("plate") or {}); price = STAR_ITEMS["p500"][0]
+    elif item in ("b50", "b100", "noads"): price = STAR_ITEMS[item][0]
+    elif item == "bal":
+        try: st = int(b.get("s", 0))
+        except (TypeError, ValueError): raise HTTPException(400, "Неверная сумма")
+        if not (STAR_MIN <= st <= STAR_MAX): raise HTTPException(400, "Обмен от %d до %d ⭐" % (STAR_MIN, STAR_MAX))
+        price = st; d["s"] = st
+    else: raise HTTPException(400, "Товар не найден")
+    wspend(c, uid, price, "buy:" + item)
+    msg = apply_payment(c, d, price, "wallet:" + os.urandom(8).hex())
+    if msg is None:
+        wadd(c, uid, price, "refund:" + item); c.commit(); raise HTTPException(400, "Не удалось выдать покупку, звёзды вернулись на баланс")
+    c.commit()
+    return {"ok": 1, "stars": wallet_of(c, uid), "msg": msg, "item": item}
+
+# ---------------------------------------------------------------- аукцион за звёзды: только Мифик и Секретные номера
+def sa_next(a): return a["start"] if not a["topuid"] else a["top"] + max(1, math.ceil(a["top"] * 0.05))
+
+def sa_settle(c):
+    now = int(time.time()); notes = []
+    for a in c.execute("SELECT * FROM star_auc WHERE status='open' AND end<=?", (now,)).fetchall():
+        if c.execute("UPDATE star_auc SET status='done' WHERE id=? AND status='open'", (a["id"],)).rowcount != 1: continue
+        p = json.loads(a["item"]); nm = plate_txt(p)
+        if a["topuid"]:
+            fee = a["top"] * SA_FEE // 100; got = a["top"] - fee
+            gift(c, a["topuid"], {"t": "plate", "v": p}); wadd(c, a["seller"], got, "sa-sold:%d" % a["id"])
+            notes.append((a["topuid"], "🏆 Вы выиграли аукцион за ⭐!\n🔢 %s\nСтавка: %d ⭐. Номер уже в вашем гараже." % (nm, a["top"]), "Открыть игру"))
+            notes.append((a["seller"], "✅ Ваш номер продан за ⭐!\n🔢 %s\nЦена: %d ⭐. Вам зачислено %d ⭐ (комиссия %d%%)." % (nm, a["top"], got, SA_FEE), "Открыть игру"))
+        else:
+            gift(c, a["seller"], {"t": "plate", "v": p})
+            notes.append((a["seller"], "⌛ Торги за ⭐ закончились без ставок.\n🔢 %s\nНомер вернулся в ваш гараж." % nm, "Открыть игру"))
+    c.commit()
+    for n in notes: notify(*n)
+
+_SA = [0, []]
+def sa_snapshot(c):
+    t = time.time()
+    if t - _SA[0] < 1.0: return _SA[1]
+    rows = c.execute("SELECT a.*,u.name sn FROM star_auc a LEFT JOIN users u ON u.id=a.seller WHERE a.status='open' ORDER BY a.end LIMIT 150").fetchall()
+    _SA[1] = [{"id": r["id"], "seller": r["seller"], "sn": str(r["sn"] or "")[:24], "plate": json.loads(r["item"]), "start": r["start"], "top": r["top"], "lead": r["topuid"] or 0,
+               "end": r["end"], "next": sa_next(r)} for r in rows]
+    _SA[0] = t; return _SA[1]
+
+@api("/api/sa/list")
+def sa_list(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    if c.execute("SELECT 1 FROM star_auc WHERE status='open' AND end<=? LIMIT 1", (int(time.time()),)).fetchone(): sa_settle(c); _SA[0] = 0
+    return {"now": int(time.time()), "list": sa_snapshot(c), "stars": wallet_of(c, uid), "gifts": gifts_of(c, uid)}
+
+@api("/api/sa/create")
+def sa_create(b):
+    uid, _ = auth(b.get("initData")); c = db(); p = clean_plate(b.get("plate") or {})
+    try: start = int(b.get("start", 0)); mins = int(b.get("mins", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверные данные лота")
+    if tier_py(p) < 4: raise HTTPException(400, "На звёздный аукцион можно выставить только Мифик и Секретные номера")
+    if mins not in (10, 60, 360, 1440) or not (SA_MIN <= start <= 1000000): raise HTTPException(400, "Стартовая ставка от %d ⭐" % SA_MIN)
+    if c.execute("SELECT COUNT(*) FROM star_auc WHERE seller=? AND status='open'", (uid,)).fetchone()[0] >= 5: raise HTTPException(400, "Не больше 5 лотов одновременно")
+    if c.execute("UPDATE uniq SET owner=-1 WHERE key=? AND owner=?", (ukey(p), uid)).rowcount != 1:   # номер уходит «в залог» аукциона
+        c.rollback(); raise HTTPException(400, "Этот единственный номер вам не принадлежит")
+    c.execute("INSERT INTO star_auc(seller,item,start,end) VALUES(?,?,?,?)", (uid, json.dumps(p), start, int(time.time()) + mins * 60)); c.commit(); _SA[0] = 0
+    return {"ok": 1}
+
+@api("/api/sa/bid")
+def sa_bid(b):
+    uid, _ = auth(b.get("initData")); c = db(); sa_settle(c); now = int(time.time())
+    try: aid = int(b["id"]); exp = int(b.get("exp", -1))
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    a = c.execute("SELECT * FROM star_auc WHERE id=? AND status='open' AND end>?", (aid, now)).fetchone()
+    if not a: raise HTTPException(400, "Торги уже закончились")
+    if a["seller"] == uid: raise HTTPException(400, "Нельзя ставить на свой лот")
+    if a["topuid"] == uid: raise HTTPException(400, "Вы уже лидер")
+    price = sa_next(a)
+    if price != exp: raise HTTPException(400, "Ставка изменилась, попробуйте ещё раз")
+    wspend(c, uid, price, "sa-bid:%d" % aid)
+    if c.execute("UPDATE star_auc SET top=?,topuid=?,end=MAX(end,?) WHERE id=? AND status='open' AND end>? AND top=? AND IFNULL(topuid,0)=?",
+                 (price, uid, now + 30, aid, now, a["top"], a["topuid"] or 0)).rowcount != 1:
+        c.rollback(); raise HTTPException(400, "Вашу ставку перебили, попробуйте ещё раз")
+    if a["topuid"]: wadd(c, a["topuid"], a["top"], "sa-refund:%d" % aid)
+    c.commit(); _SA[0] = 0
+    if a["topuid"]: notify(a["topuid"], "🔨 Вашу ставку на аукционе за ⭐ перебили!\n🔢 %s\nНовая ставка: %d ⭐. Ваши %d ⭐ вернулись на баланс." % (plate_txt(json.loads(a["item"])), price, a["top"]), "🔨 Перебить")
+    return {"ok": 1, "price": price, "stars": wallet_of(c, uid)}
+
+@api("/api/sa/cancel")
+def sa_cancel(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: aid = int(b["id"])
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    a = c.execute("SELECT * FROM star_auc WHERE id=? AND status='open'", (aid,)).fetchone()
+    if not a or a["seller"] != uid: raise HTTPException(400, "Лот недоступен")
+    if c.execute("UPDATE star_auc SET status='cancelled' WHERE id=? AND status='open' AND topuid IS NULL", (aid,)).rowcount != 1:
+        raise HTTPException(400, "На лот уже сделали ставку, снять нельзя")
+    gift(c, uid, {"t": "plate", "v": json.loads(a["item"])}); c.commit(); _SA[0] = 0
     return {"ok": 1}
 
 # ---------------------------------------------------------------- витрина: игроки продают номера и машины по фиксированной цене
@@ -1061,7 +1198,7 @@ def _bg():   # фоновый поток: торги, системные лот�
             except OSError: pass
     last_clean = last_bk = last_chk = 0
     while True:
-        try: c = db(); settle(c); duel_expire(c); system_lot(c)
+        try: c = db(); settle(c); sa_settle(c); duel_expire(c); system_lot(c)
         except Exception: log.exception("торги")
         t = time.time()
         if t - last_clean > 3600:
