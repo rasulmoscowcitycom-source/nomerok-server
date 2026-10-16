@@ -396,12 +396,12 @@ function panelDP(){if(!DUF){DUF=1;duelPoll()}if(!dueS)dueS=100000;var o=dOpts(),
 function panelD(){if(st.lv<3||!dTg())return panelDB();return '<div class="rwt"><button data-dm="0" class="'+(DM==0?"on":"")+'">🤖 С ботом</button><button data-dm="1" class="'+(DM==1?"on":"")+'">👥 С игроками</button></div>'+(DM==1?panelDP():panelDB())}
 var UPC={2:.47,5:.19,10:.095},UPI=29,upI=-1,upM=2,upIns=false,upBusy=false,upRes="",upAng=0;
 function upPct(m){var v=UPC[m]*100;return (v%1?String(v).replace(".",","):v)+"%"}
-function upOk(p){return p&&tier(p)<4}
+function upOk(p){return !!p}
 function panelU(){
  var n=st.col.length,h="",k=0,sel=st.col[upI];if(sel&&!upOk(sel)){upI=-1;sel=null}
  for(var i=n-1;i>=0&&k<PG.up;i--){var p=st.col[i];if(!upOk(p))continue;k++;h+='<button class="upc'+(i==upI?' on':'')+'" data-u="'+i+'">'+plate(p,1)+'<div class="upv">'+nfmt(val(p))+' сум'+(p.m>1?' · ⚡×'+p.m:'')+'</div></button>'}
  var ch=UPC[upM],cnt=st.ins||0;
- var o='<div class="upt">Выберите номер и множитель. При неудаче номер сгорает — если не застрахован.</div><div class="upl">'+(h||'<div class="box" style="text-align:center;color:var(--mut);width:100%">Нет подходящих номеров (Мифик и Секретные не участвуют)</div>')+'</div>'
+ var o='<div class="upt">Выберите номер и множитель. При неудаче номер сгорает — если не застрахован.</div><div class="upl">'+(h||'<div class="box" style="text-align:center;color:var(--mut);width:100%">Нет номеров</div>')+'</div>'
  +'<div class="upm">'+[2,5,10].map(function(m){return '<button data-um="'+m+'" class="'+(m==upM?'on':'')+'"><b>×'+m+'</b><span>'+upPct(m)+'</span></button>'}).join("")+'</div>'
  +'<button class="upin'+(upIns&&cnt?' on':'')+'" id="uins">🛡 '+(cnt?(upIns?'Страховка включена ✓':'Включить страховку')+' · осталось '+cnt:'Застраховать номер от сгорания')+(cnt?'':'<span class="upp">'+UPI+' ⭐</span>')+'</button>'
  +'<div class="upx"><div class="upb"><small>ТВОЙ НОМЕР</small>'+(sel?plate(sel,1)+'<b>'+nfmt(val(sel))+' сум</b>':'<i>выберите номер</i>')+'</div><div class="upa">➜</div><div class="upb"><small>ПОЛУЧИШЬ</small>'+(sel?plate(sel,1)+'<b class="ok">'+nfmt(val(sel)*upM)+' сум</b>':'<i>—</i>')+'</div></div>'
