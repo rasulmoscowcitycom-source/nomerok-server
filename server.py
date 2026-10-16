@@ -2,7 +2,7 @@
 # Запросы к базе идут в потоках (сайт не «замирает»), соединения с базой постоянные, есть индексы,
 # проверка подписки кэшируется, база сама чистится и раз в сутки копируется в папку backups.
 import asyncio, gzip, hashlib, hmac, json, logging, math, os, random, shutil, sqlite3, threading, time
-import urllib.parse, urllib.request
+import urllib.error, urllib.parse, urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, Request
@@ -67,7 +67,10 @@ def init_db():   # один раз при запуске: таблицы, инд
     if d: os.makedirs(d, exist_ok=True)
     c = sqlite3.connect(DB_PATH, timeout=30)
     try:
-        c.execute("PRAGMA journal_mode=WAL"); c.executescript(SCHEMA); c.commit()
+        c.execute("PRAGMA journal_mode=WAL"); c.executescript(SCHEMA)
+        try: c.execute("ALTER TABLE users ADD COLUMN bal INT DEFAULT 0")
+        except sqlite3.OperationalError: pass
+        c.execute("CREATE INDEX IF NOT EXISTS ix_users_bal ON users(bal)"); c.execute("CREATE INDEX IF NOT EXISTS ix_pay_uid ON payments(uid)"); c.commit()
     finally: c.close()
 
 init_db()
@@ -237,7 +240,7 @@ def uclaim(b):   # игрок выбил номер: если это Мифик/
 @api("/api/urel")
 def urel(b):   # игрок продал уникальный номер магазину - он снова может выпасть
     uid, _ = auth(b.get("initData")); p = clean_plate(b.get("p") or {}); c = db()
-    c.execute("DELETE FROM uniq WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()
+    c.execute("UPDATE uniq SET owner=0 WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()   # номер one-of-one больше никогда не выпадет
     return {"ok": 1}
 
 @api("/api/ucheck")
@@ -246,7 +249,7 @@ def ucheck(b):   # проверить номер: редкость, занят �
     row = c.execute("SELECT owner FROM uniq WHERE key=?", (ukey(p),)).fetchone() if t >= 4 else None
     own = None
     if row:
-        u = c.execute("SELECT name FROM users WHERE id=?", (row["owner"],)).fetchone(); own = (u["name"] if u else "игрок") if row["owner"] != uid else "вы"
+        u = c.execute("SELECT name FROM users WHERE id=?", (row["owner"],)).fetchone(); own = ("убран из игры" if row["owner"] == 0 else (u["name"] if u else "игрок")) if row["owner"] != uid else "вы"
     return {"tier": t, "unique": t >= 4, "taken": bool(row), "owner": own}
 
 @api("/api/ustats", method="get")
@@ -322,6 +325,45 @@ def ref_credit(c, uid):  # засчитать приглашение, когда
     for need, reward in REF_MILESTONES:
         if n == need: gift(c, p["ref"], {"t": "bal", "v": reward})
 
+def _bal_of(st):
+    try: v = int(float(st.get("bal") or 0))
+    except Exception: v = 0
+    return max(0, min(v, 9 * 10 ** 15))
+
+def _hidden_ids():   # админы (ADMINS) и HIDE_IDS не показываются в рейтинге
+    out = set()
+    for x in (os.environ.get("ADMINS", "") + "," + os.environ.get("HIDE_IDS", "")).replace(";", ",").replace(" ", ",").split(","):
+        if x.strip().lstrip("-").isdigit(): out.add(int(x))
+    return out
+HIDDEN = _hidden_ids()
+
+def bal_backfill():   # один раз: заполнить рейтинг по уже сохранённым игрокам
+    c = db()
+    if c.execute("SELECT 1 FROM meta WHERE k='bal_bf'").fetchone(): return
+    for r in c.execute("SELECT id,state FROM users WHERE state IS NOT NULL").fetchall():
+        try: c.execute("UPDATE users SET bal=? WHERE id=?", (_bal_of(json.loads(r["state"])), r["id"]))
+        except Exception: pass
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('bal_bf','1')"); c.commit()
+
+_TOP = {"ts": 0, "list": []}
+@api("/api/top")
+def top(b):
+    uid, _ = auth(b.get("initData")); c = db(); now = time.time()
+    if now - _TOP["ts"] > 15:
+        hid = sorted(HIDDEN); q = ",".join("?" * len(hid))
+        rows = c.execute("SELECT id,name,bal FROM users WHERE bal>0 " + ("AND id NOT IN (%s) " % q if hid else "") + "ORDER BY bal DESC LIMIT 20", hid).fetchall()
+        _TOP["list"] = [{"id": r["id"], "name": (r["name"] or "Игрок")[:18], "bal": r["bal"]} for r in rows]; _TOP["ts"] = now
+    out = [{"n": i + 1, "name": x["name"], "bal": x["bal"], "me": x["id"] == uid} for i, x in enumerate(_TOP["list"])]
+    me = None
+    if uid not in HIDDEN:
+        r = c.execute("SELECT bal FROM users WHERE id=?", (uid,)).fetchone(); mb = (r["bal"] if r else 0) or 0
+        hid = sorted(HIDDEN); q = ",".join("?" * len(hid))
+        rk = c.execute("SELECT COUNT(*) FROM users WHERE bal>?" + (" AND id NOT IN (%s)" % q if hid else ""), [mb] + hid).fetchone()[0] + 1
+        me = {"rank": rk, "bal": mb}
+    return {"list": out, "me": me}
+
+def stars_of(c, uid): return c.execute("SELECT COALESCE(SUM(stars),0) FROM payments WHERE uid=?", (uid,)).fetchone()[0]
+
 @api("/api/load")
 def load(b):
     uid, name = auth(b.get("initData")); now = int(time.time()); c = db()
@@ -329,7 +371,7 @@ def load(b):
     c.execute("INSERT INTO users(id,name,first_seen,last_seen) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=?,last_seen=?", (uid, name, now, now, name, now))
     if not existed: ref_credit(c, uid)
     row = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
-    head = json.dumps({"uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c)}, separators=(",", ":"))
+    head = json.dumps({"uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid)}, separators=(",", ":"))
     c.commit()
     state = row["state"] if row and row["state"] else "null"   # состояние уже хранится как JSON - вставляем как есть
     return ('{"state":%s,%s' % (state, head[1:])).encode()
@@ -342,7 +384,7 @@ def poll(b):   # один лёгкий запрос вместо четырёх:
         _SEEN[uid] = t
         if len(_SEEN) > 100000: _SEEN.clear()
         c.execute("UPDATE users SET last_seen=? WHERE id=?", (int(t), uid)); c.commit()
-    return {"gifts": gifts_of(c, uid), "offers": offers_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "ev": event_of(c)}
+    return {"gifts": gifts_of(c, uid), "offers": offers_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "ev": event_of(c), "stars": stars_of(c, uid)}
 
 def uniq_guard(c, uid, st):
     """Единственные номера (Мифик/Секретный): у каждого - ровно один владелец.
@@ -376,7 +418,7 @@ def save(b):
     if not isinstance(st, dict): raise HTTPException(400, "Неверное состояние")
     if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
     dups = uniq_guard(c, uid, st)
-    c.execute("UPDATE users SET state=?,last_seen=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), uid)); c.commit()
+    c.execute("UPDATE users SET state=?,last_seen=?,bal=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), _bal_of(st), uid)); c.commit()
     return {"ok": 1, "dup": dups} if dups else {"ok": 1}
 
 @api("/api/gifts/clear")
@@ -517,6 +559,7 @@ STAR_MIN, STAR_MAX = 50, 5000                              # пополнени�
 STAR_BONUS = [(1000, 25), (250, 10)]                       # от 250 ⭐ +10%, от 1000 ⭐ +25%
 SPIN_PRICE = 15                                            # одна звёздная крутка = 15 ⭐
 SPIN_PACKS = (1, 5, 10)
+SPIN_SAME = 0.25                                           # шанс одинаковых цифр (777) у Секретной спецсерии - такие выпадают только за звёзды
 SPIN_SECRET = 0.10                                         # шанс Секретного номера; иначе Мифик (оба - единственные в игре)
 
 def star_sum(stars):
@@ -536,17 +579,20 @@ _ULTRA = [{"k": 1, "r": "01", "d": "879", "z": "MEA"}, {"k": 1, "r": "01", "d": 
 def _claim(c, uid, p):   # атомарно занять единственный номер: получится только у одного
     return c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time()))).rowcount == 1
 
+def _pretty(d): return d[0] == d[1] == d[2] or d in ("123", "321", "456", "789", "007", "100") or d[1:] == "00"
+
 def roll_unique(c, uid):
-    """Выбить свободный единственный номер (Мифик или Секретный) и закрепить его за игроком."""
+    """Выбить свободный единственный номер (Мифик или Секретный) и закрепить его за игроком.
+    Секретный: буквы спецсерии (SBA/AAA/UZB), а регион и цифры случайные; одинаковые цифры (777) - только здесь."""
     if _RND.random() < SPIN_SECRET:
-        if _RND.random() < 0.3:
-            free = [dict(p) for p in _ULTRA if not c.execute("SELECT 1 FROM uniq WHERE key=?", (ukey(p),)).fetchone()]
-            _RND.shuffle(free)
-            for p in free:
-                if _claim(c, uid, p): return p
-        for _ in range(300):
+        for _ in range(400):
             z = _RND.choices(["SBA", "AAA", "UZB"], [40, 40, 20])[0]
-            p = {"k": 1, "r": "01", "d": "%03d" % _RND.randint(1, 999), "z": z}
+            r = "01" if _RND.random() < 0.2 else _RND.choice(_PLR)
+            if _RND.random() < SPIN_SAME: d = str(_RND.randint(1, 9)) * 3
+            else:
+                d = "%03d" % _RND.randint(1, 999)
+                if _pretty(d): continue
+            p = {"k": 1, "r": r, "d": d, "z": z}
             if tier_py(p) == 5 and _claim(c, uid, p): return p
     for _ in range(600):
         x = str(_RND.randint(1, 9)); b = _RND.choice(sorted(LETTERS))
@@ -613,8 +659,17 @@ def invoice(b):
     pl = json.dumps(payload, separators=(",", ":"))
     try: res = tg_request("createInvoiceLink", {"title": title, "description": desc, "payload": pl, "provider_token": "", "currency": "XTR",
                                                 "prices": [{"label": title, "amount": amount}]}, timeout=10)
-    except Exception: raise HTTPException(400, "Не удалось создать счёт")
-    if not res.get("ok"): raise HTTPException(400, "Не удалось создать счёт")
+    except urllib.error.HTTPError as e:   # Telegram отказал: покажем точную причину (и в логах Render)
+        try: desc = json.load(e).get("description", "")
+        except Exception: desc = ""
+        log.error("createInvoiceLink %s отклонён: %s %s", item, e.code, desc)
+        raise HTTPException(400, "Telegram: %s" % (desc[:90] or "счёт не создан"))
+    except Exception as e:
+        log.error("createInvoiceLink %s ошибка: %r", item, e)
+        raise HTTPException(400, "Не удалось создать счёт, попробуйте ещё раз")
+    if not res.get("ok"):
+        log.error("createInvoiceLink %s: %s", item, res)
+        raise HTTPException(400, "Telegram: %s" % str(res.get("description", "счёт не создан"))[:90])
     return {"url": res["result"]}
 
 # ---------------------------------------------------------------- аукцион между игроками (в реальном времени, опрос раз в 2 сек)
@@ -941,6 +996,8 @@ def db_report():   # текст для команды /stat в боте
     return "\n".join(out)
 
 def _bg():   # фоновый поток: торги, системные лоты, чистка и копии (не зависит от нагрузки на сайт)
+    try: bal_backfill()
+    except Exception: log.exception("bal_backfill")
     try: uniq_backfill()
     except Exception: log.exception("uniq_backfill")
     for f in os.listdir(BK_DIR) if os.path.isdir(BK_DIR) else []:

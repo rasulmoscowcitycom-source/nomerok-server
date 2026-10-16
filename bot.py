@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report
+from server import db, gift, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, apply_payment
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -60,25 +60,33 @@ async def chk(u: Update, ctx):
 async def precheckout(u: Update, ctx):
     await u.pre_checkout_query.answer(ok=True)
 
-async def paid(u: Update, ctx):  # оплата звёздами прошла - выдаём подарок
-    pay = u.message.successful_payment; d = json.loads(pay.invoice_payload); uid = d["u"]
-    if uid != u.effective_user.id: return
-    c = db()
-    c.execute("CREATE TABLE IF NOT EXISTS payments(charge TEXT PRIMARY KEY,uid INT,item TEXT,stars INT,ts INT)")
-    try: c.execute("INSERT INTO payments VALUES(?,?,?,?,?)", (pay.telegram_payment_charge_id, uid, d["i"], pay.total_amount, int(time.time())))
-    except sqlite3.IntegrityError: return
-    if d["i"] == "b50": gift(c, uid, {"t": "boost", "k": "bl", "v": 120})
-    elif d["i"] == "b100":
-        for k in ("bl", "bx", "bs"): gift(c, uid, {"t": "boost", "k": k, "v": 120})
-    elif d["i"] == "noads": gift(c, uid, {"t": "noads"})
-    elif d["i"] == "p500": gift(c, uid, {"t": "plate", "v": d["p"]})
-    c.commit()
-    await u.message.reply_text("⭐ Оплата получена! Откройте игру: подарок уже там.")
+async def paid(u: Update, ctx):  # оплата звёздами прошла - выдаём подарок (вся логика в server.apply_payment)
+    pay = u.message.successful_payment; d = json.loads(pay.invoice_payload)
+    if int(d["u"]) != u.effective_user.id: return
+    try: msg = apply_payment(db(), d, pay.total_amount, pay.telegram_payment_charge_id)
+    except Exception as e:   # деньги получены, а выдача упала - не молчим: пишем игроку и админам, в логах Render будет подробность
+        import logging, traceback; logging.getLogger("uzn").error("ОПЛАТА НЕ ВЫДАНА uid=%s item=%s charge=%s\n%s", d.get("u"), d.get("i"), pay.telegram_payment_charge_id, traceback.format_exc())
+        await u.message.reply_text("⚠️ Оплата получена, но выдача не удалась. Мы уже знаем и всё исправим — напишите администратору. Код платежа: %s" % pay.telegram_payment_charge_id)
+        for a in ADMINS:
+            try: await ctx.bot.send_message(a, "🚨 Оплата не выдана: игрок %s, товар %s, %s ⭐, код %s\n%r" % (d.get("u"), d.get("i"), pay.total_amount, pay.telegram_payment_charge_id, e))
+            except Exception: pass
+        return
+    if msg: await u.message.reply_text(msg)
 
 @admin
 async def stars(u, ctx):  # /stars - сколько звёзд получено
     rows = db().execute("SELECT item, COUNT(*) n, SUM(stars) s FROM payments GROUP BY item").fetchall()
     await u.message.reply_text("\n".join(f'{r["item"]}: {r["n"]} шт · {r["s"]} ⭐' for r in rows) or "Платежей пока нет")
+
+@admin
+async def lastpay(u, ctx):  # /lastpay - последние платежи и сколько подарков ещё ждут игрока (диагностика оплаты)
+    c = db(); rows = c.execute("SELECT charge,uid,item,stars,ts FROM payments ORDER BY ts DESC LIMIT 8").fetchall()
+    if not rows: await u.message.reply_text("Платежей пока нет: бот ещё ни разу не получал оплату."); return
+    out = []
+    for r in rows:
+        w = c.execute("SELECT COUNT(*) FROM gifts WHERE uid=?", (r["uid"],)).fetchone()[0]
+        out.append("%s · ID %s · %s · %s ⭐ · подарков в очереди: %s" % (time.strftime("%d.%m %H:%M", time.gmtime(r["ts"] + 5 * 3600)), r["uid"], r["item"], r["stars"], w))
+    await u.message.reply_text("Последние платежи (время Ташкента):\n" + "\n".join(out) + "\n\n«В очереди» = подарок выдан, но игра его ещё не забрала. Если там 0 и подарка нет в игре, значит он уже забран.")
 
 async def how(u: Update, ctx):
     await u.callback_query.answer()
@@ -278,6 +286,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
