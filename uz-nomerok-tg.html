@@ -49,6 +49,17 @@ h3{margin:14px 2px 8px;font-size:13px;color:var(--mut);text-transform:uppercase;
 :root:not([data-theme]),:root[data-theme="dark"]{--bg1:#34d399;--bg2:#10b981;--bgt:#022c22;--bgs:#047857}
 :root[data-theme="blue"]{--bg1:#22d3ee;--bg2:#06b6d4;--bgt:#04222b;--bgs:#0e7490}
 :root[data-theme="purple"]{--bg1:#fbbf24;--bg2:#f59e0b;--bgt:#2a1700;--bgs:#b45309}
+.rwt{display:flex;gap:6px;margin-bottom:10px}
+.rwt button{flex:1;padding:10px 6px;border:1px solid var(--ln);background:var(--c2);border-radius:12px;font-weight:700;font-size:13px;color:var(--tx)}
+.rwt button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.rwg{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:12px}
+.rwc{border:1px solid var(--ln);background:var(--c2);border-radius:12px;padding:8px 4px;text-align:center;font-size:11px;line-height:1.3;color:var(--tx)}
+.rwc b{display:block;font-size:11px;color:var(--mut);margin-bottom:3px}
+.rwc.cur{outline:2px solid var(--ac);background:var(--card)}
+.rwc.ok{opacity:.55}
+.rwc.big{grid-column:span 2}
+.rwx{width:100%;margin-top:8px;padding:14px;border:1px solid var(--ln);background:var(--c2);border-radius:14px;font-weight:700;font-size:14px;color:var(--tx)}
+.rwl{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;border:1px solid var(--ln);border-radius:12px;margin-bottom:6px;background:var(--c2)}
 </style><script src="https://telegram.org/js/telegram-web-app.js"></script></head><body>
 <div class="top"><div class="bal"><small id="dbg">Баланс</small><b id="bal"></b></div><div class="pill" id="lvl"></div><div class="pill" id="str"></div><button class="pill" id="snd">🔊</button><button class="pill" id="set">⚙️</button></div>
 <div class="box"><div class="row"><b id="lt"></b><span id="lk2" class="c0"></span></div><div class="xp" style="margin:8px 0 0"><i id="xp"></i></div></div>
@@ -61,7 +72,7 @@ h3{margin:14px 2px 8px;font-size:13px;color:var(--mut);text-transform:uppercase;
  <div class="sel"><button id="rb">📍 Любой регион</button><button id="bn">🎁 Бонус дня</button></div>
  <button class="go" id="go"></button><div id="act" hidden><button id="sv"></button><button id="kp">🚗 Оставить в гараже</button></div>
 </div>
-<input type="hidden" id="rg" value=""><div id="sh" class="sheet" hidden></div><div id="v1" hidden><h3>Машины</h3><div class="list" id="clist"></div><h3>Номера</h3><div class="list" id="list"></div></div>
+<input type="hidden" id="rg" value=""><div id="sh" class="sheet" hidden></div><div id="rw" class="sheet" hidden></div><div id="v1" hidden><h3>Машины</h3><div class="list" id="clist"></div><h3>Номера</h3><div class="list" id="list"></div></div>
 <div id="v2" hidden>
  <div class="box"><div class="row"><b>🌍 Общая цель: 10 млн круток</b><b id="gp"></b></div><div class="bar"><i id="gb"></i></div></div>
  <h3>Путь новичка</h3><div class="list" id="tasks"></div>
@@ -102,14 +113,14 @@ function done0(sell){if(!pend)return;var v=val(pend);if(sell){urel(pend);st.bal+
 var M=[{n:"Обычная",lv:1,cost:400000,tries:1,boost:0,d:"обычные номера"},{n:"Улучшенная",lv:5,cost:8000000,tries:3,boost:.12,d:"чуть лучше"},{n:"Премиум",lv:7,cost:30000000,tries:2,boost:.05,d:"хорошие номера"}],mode=0,bst=0,LK=0;
 function price(){var r=$("rg").value;return M[mode].cost+(r?RP[r]:0)}
 function mk(k,reg,t){var r=reg||RK[rnd(RK.length)],a=lt(),b=lt(),d,x=1+rnd(9);
- var PT=["123","321","456","789","100","200","300","010","500","900"];if(t==2)d=PT[rnd(PT.length)];else if(t==3&&(r=="01"||Math.random()<.6)){d=PT[rnd(PT.length)];var bb=1}else d=""+x+x+x;if(st.ld==d&&t<4){x=1+rnd(9);d=""+x+x+x}st.ld=d;
+ var PT=["123","321","456","789","100","200","300","010","500","900"];if(t==2)d=PT[rnd(PT.length)];else if(t==3&&(r=="01"||Math.random()<0.3)){d=PT[rnd(PT.length)];var bb=1}else d=""+x+x+x;if(st.ld==d&&t<4){x=1+rnd(9);d=""+x+x+x}st.ld=d;
  if(t==4&&!k&&!reg)r="01";
  if(t==4&&!reg&&Math.random()<.3)r="01";if(t==3&&!reg&&r=="01")r=RK[1+rnd(RK.length-1)];
  return ns(k?{k:1,r:r,d:d,z:t>=3?b+b+((t==4||(bb&&r!="01"))?b:lt()):a+b+lt()}:{k:0,r:r,a:a,d:d,z:t>=3?b+b:lt()+lt()})}
 function ns(o){if(o.k&&(SS[o.z]||SP.indexOf(o.z)>=0)){var n=0,z=o.z,tr=z[0]==z[1]&&z[1]==z[2],db=z[0]==z[1],c;do{c=lt();o.z=tr?c+c+c:db?c+c+lt():lt()+lt()+lt();n++}while((SS[o.z]||SP.indexOf(o.z)>=0)&&n<30)}return o}
-function luck(k,reg){var m=M[mode],best=null,bv=-1;bst=m.boost*(st.luck?2:1)+(st.luck?.16:0);LK=1;for(var i=0;i<m.tries*(st.luck?2:1);i++){var p=gen(k,reg),v=tier(p)*10+score(p);if(v>bv){bv=v;best=p}}bst=0;LK=0;var q=Math.random(),Lx=lx();if(mode<2)q/=Lx*(st.luck?1.5:1);else q=1-(1-q)/Lx;var tt=mode==2?(q<.1?0:q<.3?2:q<.99?3:4):mode==1?(q<.012?4:q<.2?3:q<.5?2:0):(q<.005?3:q<.08?2:0);if(reg=="01"&&tt==3&&Math.random()<.55)tt=2;if(tt&&tier(best)<tt)best=mk(k,reg,tt);if(best.r=="01"&&tier(best)>=3&&tier(best)<5&&Math.random()<.3)best=mk(k,reg,2);return pity(best,k,reg)}
-function pity(best,k,reg){if(mode<1)return best;if(!st.dry)st.dry=[0,0,0];var lim=mode==2?100:140,big=tier(best)>=4,h=st.hh||0;
-if(big&&st.dry[mode]<lim*.6&&Math.random()<Math.min(.95,h*2)){best=mk(k,reg,3);big=tier(best)>=4}
+function luck(k,reg){var m=M[mode],best=null,bv=-1;bst=m.boost*(st.luck?2:1)+(st.luck?.16:0);LK=1;for(var i=0;i<m.tries*(st.luck?2:1);i++){var p=gen(k,reg),v=tier(p)*10+score(p);if(v>bv){bv=v;best=p}}bst=0;LK=0;var q=Math.random(),Lx=lx();if(mode<2)q/=Lx*(st.luck?1.5:1);else q=1-(1-q)/Lx;var tt=mode==2?(q<0.06?0:q<0.2?2:q<0.84?3:4):mode==1?(q<0.035?4:q<0.27?3:q<0.55?2:0):(q<0.01?3:q<0.17?2:0);if(reg=="01"&&tt==3&&Math.random()<.55)tt=2;if(tt&&tier(best)<tt)best=mk(k,reg,tt);if(best.r=="01"&&tier(best)==3&&Math.random()<.3)best=mk(k,reg,2);return pity(best,k,reg)}
+function pity(best,k,reg){if(mode<1)return best;if(!st.dry)st.dry=[0,0,0];var lim=mode==2?35:70,big=tier(best)>=4,h=st.hh||0;
+if(big&&st.dry[mode]<lim*.6&&Math.random()<Math.min(0.35,Math.max(0,h-1.5)*0.3)){best=mk(k,reg,3);big=tier(best)>=4}
 if(!big&&st.dry[mode]>=lim*(.8+Math.random()*.4)){best=mk(k,reg,4);big=true}
 if(big){st.dry[mode]=0;st.hh=h*.9+1}else{st.dry[mode]++;st.hh=h*.97}return best}
 function rnd(n){return Math.floor(Math.random()*n)}function lt(){return L[rnd(L.length)]}
@@ -131,7 +142,7 @@ function plate0(p,nf){var fr='';if(!nf&&p.d!='???'){var t=tier(p);if(t>=2)fr=' f
 function fmt(n){return nfmt(n)+" сум"}
 function need(){return 40+st.lv*30}
 function toast(t){var e=document.createElement("div");e.className="toast";e.textContent=t;document.body.appendChild(e);setTimeout(function(){e.remove()},2200)}
-function addXp(n){n=Math.round(n*xm());st.xp+=n;while(st.xp>=need()){st.xp-=need();st.lv++;st.bal+=300000;toast("🎉 Уровень "+st.lv+" · +300 000 сум"+(st.lv==5||st.lv==7?" · 🔓 новая крутка!":""));beep(988,.25,"sine",.15,.6)}}
+function addXp(n){n=Math.round(n*xm());st.xp+=n;while(st.xp>=need()){st.xp-=need();st.lv++;st.bal+=300000;toast("🎉 Уровень "+st.lv+" · +300 000 сум"+(st.lv==5||st.lv==7?" · 🔓 новая крутка!":"")+(LVR.some(function(x){return x.l==st.lv})?" · 🎁 есть награда!":""));beep(988,.25,"sine",.15,.6)}}
 var TK=[["Сделай 5 круток",function(){return st.sp>=5}],["Выбей Эпик или выше",function(){return st.best>=2}],["Выбей фирменный номер",function(){return st.firm>=1}],["Продай номер",function(){return st.sold>=1}],["Достигни 2 уровня",function(){return st.lv>=2}],["Собери 10 номеров",function(){return st.col.length>=10}]];
 var TABN=0,DIRTY={},PG={pl:60,car:40,up:80,ps:60};
 function draw(){
@@ -185,8 +196,30 @@ $("go").onclick=function(){
   if(++n>13){clearInterval(iv);claimRoll(PP,0,function(p){var t=tier(p);pend=p;st.sp++;dq("sp",1);if(t>=2)dq("epic",1);if(p.r=="01")dq("r01",1);st.best=Math.max(st.best,t);if(t==5)st.sec=1;if(kind)st.firm++;
    show(p,"g"+t,1);setR(t);chime(t);if(t==5||(p.k&&SS[p.z]))say(p.k&&SS[p.z]?"Спецсерия "+SS[p.z][0]:"Спецсерия");if(t>=2)burst(t);addXp(10+t*15);save();draw();$("res").className="res c"+t;$("res").textContent=NM[t]+(t>1?"! ✨":"")+(t>=4?" 🔒":"")+" · "+REG[p.r]+(p.k&&SS[p.z]?" · "+SS[p.z][0]:(t==5?" · Спецсерия":""))+" · "+sh(val(p));busy=false;showAct()})}},75);
 };
-$("bn").onclick=function(){var d=new Date().toDateString();if(st.bd==d){toast("Бонус уже получен — приходите завтра");return}
- var y=new Date(Date.now()-864e5).toDateString();st.streak=st.bd==y?st.streak+1:1;st.bd=d;var r=100000+st.streak*25000;st.bal+=r;toast("🎁 +"+fmt(r)+" · серия "+st.streak);save();draw()};
+var DAILY=[{m:300000},{m:500000,bl:30},{car:1},{m:1500000,bx:30},{m:1000000,pl:2},{m:3000000,bl:60},{car:2,pl:3,m:5000000}],
+LVR=[{l:5,m:1000000},{l:7,m:2000000},{l:10,m:5000000,car:1},{l:15,m:10000000,bl:120},{l:20,m:15000000,pl:3},{l:25,m:25000000,car:2},{l:30,m:50000000,bl:360,bx:360},{l:40,m:100000000,car:3},{l:50,m:250000000,pl:3,car:3}],RWT=0;
+function bt(m){return m>=60?(m/60)+" ч":m+" мин"}
+function rwScale(n){return 1+Math.min(Math.floor((n-1)/7),8)*.5}
+function rwParts(r,sc){var o=[];sc=sc||1;if(r.m)o.push("💰 "+fmt(Math.round(r.m*sc/1000)*1000));if(r.bl)o.push("🍀 удача ×2 · "+bt(r.bl));if(r.bx)o.push("⚡ опыт ×2 · "+bt(r.bx));if(r.bs)o.push("💸 продажа +25% · "+bt(r.bs));if(r.car!=null)o.push("🚗 "+["машина","редкая машина","мифическая машина","легендарная машина"][r.car]);if(r.pl)o.push("🔢 "+(r.pl==2?"эпик-номер":"легендарный номер"));return o}
+function rwApply(r,sc){var o=[],now=Date.now();sc=sc||1;if(r.m){var v=Math.round(r.m*sc/1000)*1000;st.bal+=v;o.push("+"+fmt(v))}
+ [["bl","🍀 удача ×2"],["bx","⚡ опыт ×2"],["bs","💸 продажа +25%"]].forEach(function(b){if(r[b[0]]){st[b[0]]=Math.max(now,st[b[0]]||0)+r[b[0]]*60000;o.push(b[1]+" · "+bt(r[b[0]]))}});
+ if(r.car!=null){var c=rollCar(r.car);st.cars.push(c);o.push("🚗 "+c.n)}
+ if(r.pl){var p=null,n=0;do{p=mk(0,"",r.pl);n++}while(tier(p)!=r.pl&&n<60);st.col.push(p);o.push("🔢 "+NM[tier(p)]+" "+(p.k?p.d+" "+p.z:p.a+" "+p.d+" "+p.z))}
+ return o}
+function dInfo(){var d=new Date().toDateString(),y=new Date(Date.now()-864e5).toDateString(),got=st.bd==d,cur=got?(st.streak||1):(st.bd==y?(st.streak||0)+1:1);return{got:got,cur:cur}}
+function lrList(){return st.lr||(st.lr=[])}
+function lrReady(){return LVR.filter(function(x){return st.lv>=x.l&&lrList().indexOf(x.l)<0})}
+function rwBadge(){var b=$("bn");if(!b)return;var on=!dInfo().got||lrReady().length>0,t=on?"🎁 Награды ●":"🎁 Награды";if(b.textContent!==t)b.textContent=t}
+function rwOpen(tab){if(tab!=null)RWT=tab;var el=$("rw"),di=dInfo(),h='<div class="sc"><div class="hd">🎁 Награды</div><div class="rwt"><button data-rt="0" class="'+(RWT==0?"on":"")+'">📅 Каждый день</button><button data-rt="1" class="'+(RWT==1?"on":"")+'">⭐ За уровни'+(lrReady().length?" ●":"")+'</button></div>';
+ if(RWT==0){var idx=(di.cur-1)%7,sc=rwScale(di.cur);h+='<div style="font-size:12px;color:var(--mut);margin-bottom:8px;text-align:center">Заходите каждый день: подарки растут. Пропустили день — серия начнётся заново.'+(sc>1?" Бонус серии: деньги ×"+sc.toFixed(1):"")+'</div><div class="rwg">'+DAILY.map(function(r,i){var st0=i<idx||(i==idx&&di.got)?"ok":i==idx?"cur":"";return '<div class="rwc '+st0+(i==6?" big":"")+'"><b>День '+(i+1)+'</b>'+rwParts(r,sc).map(function(x){return '<div>'+x+'</div>'}).join("")+(st0=="ok"?'<div style="color:#22c55e;font-weight:800">✓ получено</div>':'')+'</div>'}).join("")+'</div>'+(di.got?'<button class="go" disabled style="padding:14px;font-size:15px">Сегодня уже получено · до завтра</button>':'<button class="go" id="rwd" style="padding:14px;font-size:15px">🎁 Забрать · день '+(idx+1)+'</button>')}
+ else h+=LVR.map(function(x){var got=lrList().indexOf(x.l)>=0,rd=!got&&st.lv>=x.l;return '<div class="rwl"><div><b>Уровень '+x.l+'</b><div style="font-size:12px;color:var(--mut)">'+rwParts(x).join(" · ")+'</div></div>'+(got?'<span style="color:#22c55e;font-weight:800">✓</span>':rd?'<button class="go" data-lv="'+x.l+'" style="width:auto;padding:9px 14px;font-size:13px">Забрать</button>':'<span style="color:var(--mut);font-size:12px">🔒 ещё '+(x.l-st.lv)+' ур.</span>')+'</div>'}).join("")+'<div style="font-size:12px;color:var(--mut);text-align:center;margin-top:6px">Ваш уровень: '+st.lv+'</div>';
+ h+='<button class="rwx" data-rt="x">Закрыть</button></div>';el.innerHTML=h;el.hidden=false}
+$("bn").onclick=function(){rwOpen(dInfo().got&&lrReady().length?1:0)};
+$("rw").onclick=function(e){var b=e.target.closest("button");if(!b){if(e.target===this)this.hidden=true;return}var d=b.dataset;
+ if(d.rt==="x"){this.hidden=true;return}if(d.rt!==undefined){rwOpen(+d.rt);return}
+ if(b.id=="rwd"){var di=dInfo();if(di.got)return;st.streak=di.cur;st.bd=new Date().toDateString();var o=rwApply(DAILY[(di.cur-1)%7],rwScale(di.cur));save();draw();rwBadge();toast("🎁 День "+di.cur+": "+o.join(" · "));chime(2);rwOpen();return}
+ if(d.lv){var x=LVR.filter(function(v){return v.l==+d.lv})[0];if(!x||st.lv<x.l||lrList().indexOf(x.l)>=0)return;lrList().push(x.l);var o2=rwApply(x);save();draw();rwBadge();toast("🎁 Уровень "+x.l+": "+o2.join(" · "));chime(3);rwOpen()}};
+setInterval(rwBadge,2500);setTimeout(rwBadge,800);
 function seg(k){if(busy||pend)return;kind=k;$("k0").className=k?"":"on";$("k1").className=k?"on":"";show({k:k,r:$("rg").value||"??",a:"?",d:"???",z:k?"???":"??"})}
 $("k0").onclick=function(){seg(0)};$("k1").onclick=function(){seg(1)};
 function tab(n){var o=TABN;TABN=n;for(var i=0;i<5;i++){$("n"+i).className=i==n?"on":"";if(i==0)$("v0").hidden=n!=0;else $("v"+i).hidden=n!=i}if(o==1&&n!=1){PG.pl=60;PG.car=40;DIRTY[1]=1;$("list").innerHTML="";$("clist").innerHTML=""}if(n==4)DIRTY[4]=1;renderTab(n)}
