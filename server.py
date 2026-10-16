@@ -213,6 +213,17 @@ def tier_py(p):  # то же, что tier() в игре
 def ukey(p): return "%s|%s|%s|%s|%s" % (p.get("k"), p.get("r"), p.get("a") or "", p.get("d"), p.get("z"))
 def is_uniq(p): return isinstance(p, dict) and tier_py(p) >= 4
 
+def need_own(c, uid, v):
+    """Единственный номер (Мифик/Секретный) можно выставить/поставить в дуэль только если он ваш по базе:
+    иначе можно подделать чужой или несуществующий номер."""
+    pl = v.get("pl") if isinstance(v, dict) and "pl" in v else v
+    if not isinstance(pl, dict): return
+    try: p = clean_plate(pl)
+    except HTTPException: raise HTTPException(400, "Неверный номер")
+    if tier_py(p) >= 4:
+        row = c.execute("SELECT owner FROM uniq WHERE key=?", (ukey(p),)).fetchone()
+        if not row or row["owner"] != uid: raise HTTPException(400, "Этот единственный номер вам не принадлежит")
+
 def uniq_set(c, uid, p):   # передать номер новому владельцу
     c.execute("INSERT OR REPLACE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time())))
 
@@ -226,11 +237,7 @@ def gift(c, uid, d):
 def clean_plate(p):
     try: k = int(p["k"]); r = str(p["r"]); d = str(p["d"]); z = str(p["z"]).upper(); a = str(p.get("a") or "").upper()
     except Exception: raise HTTPException(400, "Неверный номер")
-    out = {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
-    try: m = int(p.get("m") or 1)
-    except (TypeError, ValueError): m = 1
-    if 1 < m <= 1000: out["m"] = m     # множитель после апгрейда
-    return out
+    return {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
 
 @api("/api/uclaim")
 def uclaim(b):   # игрок выбил номер: если это Мифик/Секретный - закрепить его за собой, если свободен
@@ -340,6 +347,8 @@ def _hidden_ids():   # админы (ADMINS) и HIDE_IDS не показываю
         if x.strip().lstrip("-").isdigit(): out.add(int(x))
     return out
 HIDDEN = _hidden_ids()
+BAL_JUMP = int(os.environ.get("BAL_JUMP", 3 * 10 ** 9))   # скачок баланса за одно сохранение, после которого админы получают оповещение
+_JUMP = {}
 
 def bal_backfill():   # один раз: заполнить рейтинг по уже сохранённым игрокам
     c = db()
@@ -433,6 +442,12 @@ def save(b):
     if not isinstance(st, dict): raise HTTPException(400, "Неверное состояние")
     if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
     dups = uniq_guard(c, uid, st); own = st.pop("_own", 0)
+    try:    # подозрительный скачок баланса за одно сохранение - сообщаем админам (читеры правят состояние игры)
+        old = c.execute("SELECT bal FROM users WHERE id=?", (uid,)).fetchone(); nb = _bal_of(st)
+        if old and nb - (old["bal"] or 0) > BAL_JUMP and uid not in HIDDEN and time.time() - _JUMP.get(uid, 0) > 3600:
+            _JUMP[uid] = time.time(); log.warning("ПОДОЗРЕНИЕ: баланс %s: %s -> %s", uid, old["bal"], nb)
+            for a in HIDDEN: notify(a, "⚠️ Подозрительный скачок баланса\nИгрок ID %s: %s → %s сум" % (uid, fnum(old["bal"] or 0), fnum(nb)), "🎰 Открыть игру")
+    except Exception: log.exception("jump check")
     c.execute("UPDATE users SET state=?,last_seen=?,bal=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), _bal_of(st), uid)); c.commit()
     r = {"ok": 1}
     if dups: r["dup"] = dups
@@ -474,6 +489,7 @@ def offer_create(b):
         raise HTTPException(400, "Игрок с таким ID не найден")
     if not isinstance(item, dict) or item.get("t") not in ("plate", "car") or not isinstance(item.get("v"), dict):
         raise HTTPException(400, "Неверные данные предложения")
+    need_own(c, uid, item["v"])
     c.execute("INSERT INTO offers(frm,to_id,item,price,ts) VALUES(?,?,?,?,?)", (uid, to, json.dumps(item), price, int(time.time()))); c.commit()
     notify(to, "🤝 %s предлагает вам обмен:\n%s\nЦена: %s" % (str(uname)[:30] or ("ID %d" % uid), item_txt(item), (fnum(price) + " сум") if price else "бесплатно (подарок)"), "🤝 Открыть предложение")
     return {"ok": 1}
@@ -569,7 +585,6 @@ STAR_ITEMS = {  # item: (звёзды, название, описание)
     "b100": (100, "Набор бустов на 2 часа", "Удача x2, опыт x2 и бонус продажи +25% на 2 часа"),
     "noads": (150, "Отключить рекламу", "Убрать рекламный баннер в игре навсегда"),
     "p500": (500, "Любой номер на выбор", "Номер, который вы выберете сами"),
-    "ins": (29, "Страховка апгрейда", "Защищает номер от сгорания при неудачном апгрейде (1 раз)"),
 }
 
 # ---------------------------------------------------------------- звёзды: пополнение баланса и «звёздная крутка» (единственные номера)
@@ -644,7 +659,6 @@ def apply_payment(c, d, total, charge):
     elif item == "b100":
         for k in ("bl", "bx", "bs"): gift(c, uid, {"t": "boost", "k": k, "v": 120})
     elif item == "noads": gift(c, uid, {"t": "noads"})
-    elif item == "ins": gift(c, uid, {"t": "ins"}); msg = "🛡 Страховка апгрейда получена! Она уже в игре."
     elif item == "p500": gift(c, uid, {"t": "plate", "v": d["p"]})
     elif item == "bal":
         st = int(d.get("s", 0))
@@ -746,6 +760,7 @@ def auc_create(b):
     except (TypeError, ValueError): raise HTTPException(400, "Неверные данные лота")
     if item.get("t") not in ("plate", "car") or not isinstance(item.get("v"), dict) or mins not in (1, 3, 10, 60, 360, 1440) or not (1000 <= start <= 10**10):
         raise HTTPException(400, "Неверные данные лота")
+    need_own(c, uid, item["v"])
     if c.execute("SELECT COUNT(*) FROM auctions WHERE seller=? AND status='open'", (uid,)).fetchone()[0] >= 10:
         raise HTTPException(400, "Не больше 10 лотов одновременно")
     c.execute("INSERT INTO auctions(seller,item,start,end) VALUES(?,?,?,?)", (uid, json.dumps(item), start, int(time.time()) + mins * 60)); c.commit()
@@ -810,6 +825,7 @@ def shop_create(b):
     except (TypeError, ValueError): raise HTTPException(400, "Неверная цена")
     if not isinstance(item, dict) or item.get("t") not in ("plate", "car") or not isinstance(item.get("v"), dict) or not (1000 <= price <= 10**10):
         raise HTTPException(400, "Неверные данные: цена от 1 000")
+    need_own(c, uid, item["v"])
     if c.execute("SELECT COUNT(*) FROM shop WHERE seller=? AND status='open'", (uid,)).fetchone()[0] >= 20:
         raise HTTPException(400, "Не больше 20 предметов на витрине")
     c.execute("INSERT INTO shop(seller,item,price,ts) VALUES(?,?,?,?)", (uid, json.dumps(item), price, int(time.time()))); c.commit()
@@ -879,6 +895,7 @@ def duel_create(b):
     try: stake = int(b.get("stake", 0))
     except (TypeError, ValueError): raise HTTPException(400, "Неверная ставка")
     if stake not in DUEL_STAKES: raise HTTPException(400, "Неверная ставка")
+    need_own(c, uid, plate)
     if c.execute("SELECT COUNT(*) FROM duels WHERE a=? AND status='open'", (uid,)).fetchone()[0] >= 3:
         raise HTTPException(400, "Не больше 3 открытых вызовов")
     c.execute("INSERT INTO duels(a,aplate,stake,ts) VALUES(?,?,?,?)", (uid, json.dumps(plate), stake, int(time.time()))); c.commit(); _DU[0] = 0
@@ -889,6 +906,7 @@ def duel_accept(b):
     uid, uname = auth(b.get("initData")); c = db(); bplate = clean_plate(b.get("plate") or {})
     try: did = int(b["id"])
     except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    need_own(c, uid, bplate)
     d = c.execute("SELECT * FROM duels WHERE id=? AND status='open'", (did,)).fetchone()
     if not d: raise HTTPException(400, "Вызов уже принят или отменён")
     if d["a"] == uid: raise HTTPException(400, "Нельзя принять свой вызов")

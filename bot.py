@@ -165,6 +165,19 @@ async def addbal(u, ctx):  # /addbal ID СУММА - пополнить бала
     await u.message.reply_text(f"Баланс игрока {uid} пополнен на {n:,} сум (придёт при следующем заходе).")
 
 @admin
+async def takebal(u, ctx):  # /takebal ID СУММА (или all) - списать деньги у игрока
+    try: uid = int(ctx.args[0]); w = ctx.args[1].lower().replace(" ", "")
+    except Exception: return await u.message.reply_text("Использование: /takebal ID СУММА\n/takebal ID all - забрать всё\nНайти ID: /find имя")
+    c = db(); row = c.execute("SELECT name,bal FROM users WHERE id=?", (uid,)).fetchone()
+    if not row: return await u.message.reply_text("Игрок с таким ID не найден")
+    have = int(row["bal"] or 0)
+    try: n = have if w in ("all", "все", "всё") else int(w)
+    except ValueError: return await u.message.reply_text("Сумма должна быть числом или all")
+    if n <= 0: return await u.message.reply_text("Сумма должна быть больше нуля")
+    gift(c, uid, {"t": "bal", "v": -n}); c.commit()
+    await u.message.reply_text(f"У игрока {row['name']} ({uid}) спишется {n:,} сум (сейчас у него {have:,}). Спишется при его следующем заходе (до 45 сек), баланс не уйдёт ниже нуля.")
+
+@admin
 async def broadcast(u, ctx):  # /broadcast текст - рассылка всем игрокам
     import asyncio
     parts = (u.message.text or "").split(None, 1)
@@ -286,6 +299,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
