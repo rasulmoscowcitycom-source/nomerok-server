@@ -374,6 +374,13 @@ def load(b):
     head = json.dumps({"uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid)}, separators=(",", ":"))
     c.commit()
     state = row["state"] if row and row["state"] else "null"   # состояние уже хранится как JSON - вставляем как есть
+    if state != "null" and ('"z"' in state):
+        try:
+            st = json.loads(state); uniq_guard(c, uid, st); st.pop("_own", None)
+            ns = json.dumps(st, separators=(",", ":"))
+            if ns != state:
+                c.execute("UPDATE users SET state=?,bal=? WHERE id=?", (ns, _bal_of(st), uid)); c.commit(); state = ns
+        except Exception: log.exception("load: чистка дублей")
     return ('{"state":%s,%s' % (state, head[1:])).encode()
 
 _SEEN = {}
@@ -389,7 +396,7 @@ def poll(b):   # один лёгкий запрос вместо четырёх:
 def uniq_guard(c, uid, st):
     """Единственные номера (Мифик/Секретный): у каждого - ровно один владелец.
     Чужой/уже занятый номер в состоянии игрока удаляется, свободный - закрепляется за ним."""
-    dups = []
+    dups = []; seen = set(); st["_own"] = 0
     def chk(p):
         if not isinstance(p, dict): return True
         try: pp = clean_plate(p)
@@ -400,6 +407,9 @@ def uniq_guard(c, uid, st):
         row = c.execute("SELECT owner FROM uniq WHERE key=?", (k,)).fetchone()
         if row and row["owner"] != uid:
             dups.append(pp); return False
+        if k in seen:            # второй такой же номер у самого владельца
+            st["_own"] += 1; return False
+        seen.add(k)
         return True
     col = st.get("col")
     if isinstance(col, list):
@@ -410,6 +420,7 @@ def uniq_guard(c, uid, st):
             if isinstance(car, dict) and car.get("pl") is not None and not chk(car["pl"]): car["pl"] = None
     if dups:
         log.warning("uniq: дубликаты у %s: %s", uid, [ukey(p) for p in dups])
+    if st.get("_own"): log.warning("uniq: двойники у владельца %s: %s", uid, st["_own"])
     return dups
 
 @api("/api/save")
@@ -417,9 +428,12 @@ def save(b):
     uid, _ = auth(b.get("initData")); c = db(); st = b.get("state")
     if not isinstance(st, dict): raise HTTPException(400, "Неверное состояние")
     if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
-    dups = uniq_guard(c, uid, st)
+    dups = uniq_guard(c, uid, st); own = st.pop("_own", 0)
     c.execute("UPDATE users SET state=?,last_seen=?,bal=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), _bal_of(st), uid)); c.commit()
-    return {"ok": 1, "dup": dups} if dups else {"ok": 1}
+    r = {"ok": 1}
+    if dups: r["dup"] = dups
+    if own: r["own"] = own
+    return r
 
 @api("/api/gifts/clear")
 def clear(b):
@@ -559,7 +573,9 @@ STAR_MIN, STAR_MAX = 50, 5000                              # пополнени�
 STAR_BONUS = [(1000, 25), (250, 10)]                       # от 250 ⭐ +10%, от 1000 ⭐ +25%
 SPIN_PRICE = 15                                            # одна звёздная крутка = 15 ⭐
 SPIN_PACKS = (1, 5, 10)
-SPIN_SAME = 0.25                                           # шанс одинаковых цифр (777) у Секретной спецсерии - такие выпадают только за звёзды
+SPIN_MYTHIC = 0.10                                         # шанс Мифика в крутке за звёзды, остальное - Секретный
+SPIN_PAA = 0.03                                            # шанс номера PAA в крутке за звёзды
+SPIN_SAME = 0.05                                           # шанс одинаковых цифр (777) у Секретной спецсерии - такие выпадают только за звёзды
 SPIN_SECRET = 0.10                                         # шанс Секретного номера; иначе Мифик (оба - единственные в игре)
 
 def star_sum(stars):
@@ -570,7 +586,7 @@ def star_sum(stars):
 def stars_info(b):
     auth(b.get("initData"))
     return {"rate": STAR_RATE, "min": STAR_MIN, "max": STAR_MAX, "bonus": [[lim, p] for lim, p in STAR_BONUS], "spin": SPIN_PRICE,
-            "packs": list(SPIN_PACKS), "secret": int(SPIN_SECRET * 100), "mythic": 100 - int(SPIN_SECRET * 100)}
+            "packs": list(SPIN_PACKS), "secret": 100 - int(SPIN_MYTHIC * 100) - int(SPIN_PAA * 100), "mythic": int(SPIN_MYTHIC * 100), "paa": int(SPIN_PAA * 100)}
 
 _PLR = ["01", "10", "20", "25", "30", "40", "50", "60", "70", "75", "80", "85", "90", "95"]
 _ULTRA = [{"k": 1, "r": "01", "d": "879", "z": "MEA"}, {"k": 1, "r": "01", "d": "762", "z": "MMA"}, {"k": 1, "r": "01", "d": "500", "z": "SOO"},
@@ -582,23 +598,27 @@ def _claim(c, uid, p):   # атомарно занять единственны�
 def _pretty(d): return d[0] == d[1] == d[2] or d in ("123", "321", "456", "789", "007", "100") or d[1:] == "00"
 
 def roll_unique(c, uid):
-    """Выбить свободный единственный номер (Мифик или Секретный) и закрепить его за игроком.
-    Секретный: буквы спецсерии (SBA/AAA/UZB), а регион и цифры случайные; одинаковые цифры (777) - только здесь."""
-    if _RND.random() < SPIN_SECRET:
+    """Крутка за звёзды: 90% Секретный (спецсерия SBA/AAA/UZB, случайные регион и цифры, одинаковые - редко),
+    10% Мифик (тройные цифры). Оба - единственные в игре. Занятых номеров не бывает; нет свободного -> None."""
+    if _RND.random() < SPIN_PAA:      # номер PAA (Администрация Президента), цифры случайные
         for _ in range(400):
-            z = _RND.choices(["SBA", "AAA", "UZB"], [40, 40, 20])[0]
-            r = "01" if _RND.random() < 0.2 else _RND.choice(_PLR)
-            if _RND.random() < SPIN_SAME: d = str(_RND.randint(1, 9)) * 3
-            else:
-                d = "%03d" % _RND.randint(1, 999)
-                if _pretty(d): continue
-            p = {"k": 1, "r": r, "d": d, "z": z}
-            if tier_py(p) == 5 and _claim(c, uid, p): return p
-    for _ in range(600):
-        x = str(_RND.randint(1, 9)); b = _RND.choice(sorted(LETTERS))
-        if _RND.random() < 0.5: p = {"k": 1, "r": _RND.choice(_PLR), "d": x * 3, "z": b * 3}
-        else: p = {"k": 0, "r": "01", "a": _RND.choice(sorted(LETTERS)), "d": x * 3, "z": b * 2}
-        if tier_py(p) == 4 and _claim(c, uid, p): return p
+            p = {"k": 1, "r": _RND.choice(_PLR), "d": "%03d" % _RND.randint(1, 999), "z": "PAA"}
+            if tier_py(p) >= 4 and _claim(c, uid, p): return p
+    if _RND.random() < SPIN_MYTHIC:
+        for _ in range(600):
+            x = str(_RND.randint(1, 9)); b = _RND.choice(sorted(LETTERS))
+            if _RND.random() < 0.5: p = {"k": 1, "r": _RND.choice(_PLR), "d": x * 3, "z": b * 3}
+            else: p = {"k": 0, "r": "01", "a": _RND.choice(sorted(LETTERS)), "d": x * 3, "z": b * 2}
+            if tier_py(p) == 4 and _claim(c, uid, p): return p
+    for _ in range(800):
+        z = _RND.choices(["SBA", "AAA", "UZB"], [40, 40, 20])[0]
+        r = "01" if _RND.random() < 0.2 else _RND.choice(_PLR)
+        if _RND.random() < SPIN_SAME: d = str(_RND.randint(1, 9)) * 3
+        else:
+            d = "%03d" % _RND.randint(1, 999)
+            if _pretty(d): continue
+        p = {"k": 1, "r": r, "d": d, "z": z}
+        if tier_py(p) == 5 and _claim(c, uid, p): return p
     return None
 
 def apply_payment(c, d, total, charge):
@@ -622,7 +642,7 @@ def apply_payment(c, d, total, charge):
         got = []
         for _ in range(n):
             p = roll_unique(c, uid)
-            if p: gift(c, uid, {"t": "plate", "v": p, "src": "spin"}); got.append("%s (%s)" % (plate_txt(p), "Секретный" if tier_py(p) >= 5 else "Мифик"))
+            if p: gift(c, uid, {"t": "plate", "v": p, "src": "spin"}); got.append("%s (%s)" % (plate_txt(p), "Секретный" if tier_py(p) >= 5 else "PAA" if p.get("z") == "PAA" else "Мифик"))
             else: gift(c, uid, {"t": "bal", "v": SPIN_PRICE * STAR_RATE})   # единственные номера закончились - вернём стоимость сумами
         msg = "🎰 Звёздная крутка! Ваши единственные номера:\n" + "\n".join("🔢 " + x for x in got) + "\nОни уже в игре."
     c.commit()
