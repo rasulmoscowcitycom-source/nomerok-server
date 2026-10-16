@@ -226,7 +226,11 @@ def gift(c, uid, d):
 def clean_plate(p):
     try: k = int(p["k"]); r = str(p["r"]); d = str(p["d"]); z = str(p["z"]).upper(); a = str(p.get("a") or "").upper()
     except Exception: raise HTTPException(400, "Неверный номер")
-    return {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
+    out = {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
+    try: m = int(p.get("m") or 1)
+    except (TypeError, ValueError): m = 1
+    if 1 < m <= 1000: out["m"] = m     # множитель после апгрейда
+    return out
 
 @api("/api/uclaim")
 def uclaim(b):   # игрок выбил номер: если это Мифик/Секретный - закрепить его за собой, если свободен
@@ -565,6 +569,7 @@ STAR_ITEMS = {  # item: (звёзды, название, описание)
     "b100": (100, "Набор бустов на 2 часа", "Удача x2, опыт x2 и бонус продажи +25% на 2 часа"),
     "noads": (150, "Отключить рекламу", "Убрать рекламный баннер в игре навсегда"),
     "p500": (500, "Любой номер на выбор", "Номер, который вы выберете сами"),
+    "ins": (29, "Страховка апгрейда", "Защищает номер от сгорания при неудачном апгрейде (1 раз)"),
 }
 
 # ---------------------------------------------------------------- звёзды: пополнение баланса и «звёздная крутка» (единственные номера)
@@ -597,28 +602,36 @@ def _claim(c, uid, p):   # атомарно занять единственны�
 
 def _pretty(d): return d[0] == d[1] == d[2] or d in ("123", "321", "456", "789", "007", "100") or d[1:] == "00"
 
-def roll_unique(c, uid):
-    """Крутка за звёзды: 90% Секретный (спецсерия SBA/AAA/UZB, случайные регион и цифры, одинаковые - редко),
-    10% Мифик (тройные цифры). Оба - единственные в игре. Занятых номеров не бывает; нет свободного -> None."""
-    if _RND.random() < SPIN_PAA:      # номер PAA (Администрация Президента), цифры случайные
+SER_REG = {"SBA": ("25", "40"), "AAA": ("25", "40"), "UZB": ("25", "40", "01")}   # где выпадают спецсерии (Джизак, Фергана; UZB ещё Ташкент)
+PAA_REG = ("25", "40", "01")
+
+def roll_unique(c, uid, reg=""):
+    """Крутка за звёзды. Регион можно выбрать (reg), пусто - любой.
+    PAA (3%) и Секретный (спецсерии SBA/AAA/UZB) - только в своих регионах: SBA/AAA на 25 и 40, UZB и PAA на 25, 40 и 01.
+    Мифик (тройные цифры) - в любом регионе. Нет подходящего - Мифик; свободных нет вовсе - None (сумы)."""
+    if reg not in _PLR: reg = ""
+    if _RND.random() < SPIN_PAA and (not reg or reg in PAA_REG):
         for _ in range(400):
-            p = {"k": 1, "r": _RND.choice(_PLR), "d": "%03d" % _RND.randint(1, 999), "z": "PAA"}
+            p = {"k": 1, "r": reg or _RND.choice(PAA_REG), "d": "%03d" % _RND.randint(1, 999), "z": "PAA"}
             if tier_py(p) >= 4 and _claim(c, uid, p): return p
-    if _RND.random() < SPIN_MYTHIC:
-        for _ in range(600):
-            x = str(_RND.randint(1, 9)); b = _RND.choice(sorted(LETTERS))
-            if _RND.random() < 0.5: p = {"k": 1, "r": _RND.choice(_PLR), "d": x * 3, "z": b * 3}
-            else: p = {"k": 0, "r": "01", "a": _RND.choice(sorted(LETTERS)), "d": x * 3, "z": b * 2}
-            if tier_py(p) == 4 and _claim(c, uid, p): return p
-    for _ in range(800):
-        z = _RND.choices(["SBA", "AAA", "UZB"], [40, 40, 20])[0]
-        r = "01" if _RND.random() < 0.2 else _RND.choice(_PLR)
-        if _RND.random() < SPIN_SAME: d = str(_RND.randint(1, 9)) * 3
-        else:
-            d = "%03d" % _RND.randint(1, 999)
-            if _pretty(d): continue
-        p = {"k": 1, "r": r, "d": d, "z": z}
-        if tier_py(p) == 5 and _claim(c, uid, p): return p
+    sers = [z for z in ("SBA", "AAA", "UZB") if not reg or reg in SER_REG[z]]
+    want_sec = bool(sers) and _RND.random() >= SPIN_MYTHIC
+    if want_sec:
+        w = {"SBA": 40, "AAA": 40, "UZB": 20}
+        for _ in range(800):
+            z = _RND.choices(sers, [w[x] for x in sers])[0]
+            r = reg or _RND.choice(SER_REG[z])
+            if _RND.random() < SPIN_SAME: d = str(_RND.randint(1, 9)) * 3
+            else:
+                d = "%03d" % _RND.randint(1, 999)
+                if _pretty(d): continue
+            p = {"k": 1, "r": r, "d": d, "z": z}
+            if tier_py(p) == 5 and _claim(c, uid, p): return p
+    for _ in range(800):   # Мифик (или запасной вариант)
+        x = str(_RND.randint(1, 9)); b = _RND.choice(sorted(LETTERS))
+        if reg not in ("", "01") or _RND.random() < 0.5: p = {"k": 1, "r": reg or _RND.choice(_PLR), "d": x * 3, "z": b * 3}
+        else: p = {"k": 0, "r": "01", "a": _RND.choice(sorted(LETTERS)), "d": x * 3, "z": b * 2}
+        if tier_py(p) == 4 and _claim(c, uid, p): return p
     return None
 
 def apply_payment(c, d, total, charge):
@@ -631,6 +644,7 @@ def apply_payment(c, d, total, charge):
     elif item == "b100":
         for k in ("bl", "bx", "bs"): gift(c, uid, {"t": "boost", "k": k, "v": 120})
     elif item == "noads": gift(c, uid, {"t": "noads"})
+    elif item == "ins": gift(c, uid, {"t": "ins"}); msg = "🛡 Страховка апгрейда получена! Она уже в игре."
     elif item == "p500": gift(c, uid, {"t": "plate", "v": d["p"]})
     elif item == "bal":
         st = int(d.get("s", 0))
@@ -641,7 +655,7 @@ def apply_payment(c, d, total, charge):
         if n not in SPIN_PACKS or total < n * SPIN_PRICE: log.error("платёж spin: неверная сумма %s %s", n, total); c.commit(); return None
         got = []
         for _ in range(n):
-            p = roll_unique(c, uid)
+            p = roll_unique(c, uid, str(d.get("g") or ""))
             if p: gift(c, uid, {"t": "plate", "v": p, "src": "spin"}); got.append("%s (%s)" % (plate_txt(p), "Секретный" if tier_py(p) >= 5 else "PAA" if p.get("z") == "PAA" else "Мифик"))
             else: gift(c, uid, {"t": "bal", "v": SPIN_PRICE * STAR_RATE})   # единственные номера закончились - вернём стоимость сумами
         msg = "🎰 Звёздная крутка! Ваши единственные номера:\n" + "\n".join("🔢 " + x for x in got) + "\nОни уже в игре."
@@ -672,7 +686,10 @@ def invoice(b):
         try: n = int(b.get("n", 0))
         except (TypeError, ValueError): raise HTTPException(400, "Неверное количество")
         if n not in SPIN_PACKS: raise HTTPException(400, "Неверное количество")
+        reg = str(b.get("reg") or "")
+        if reg and reg not in _PLR: raise HTTPException(400, "Неверный регион")
         amount, title, desc = n * SPIN_PRICE, "Звёздная крутка x%d" % n, "Выпадает единственный в игре номер: Мифик или Секретный"; payload = {"u": uid, "i": item, "n": n}
+        if reg: payload["g"] = reg
     elif item not in STAR_ITEMS: raise HTTPException(400, "Товар не найден")
     else: amount, title, desc = STAR_ITEMS[item]; payload = {"u": uid, "i": item}
     if item == "p500": payload["p"] = check_plate(b.get("plate") or {})
