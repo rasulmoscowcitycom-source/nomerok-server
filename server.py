@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT);
 CREATE TABLE IF NOT EXISTS uniq(key TEXT PRIMARY KEY,owner INT,ts INT);
 CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open');
 CREATE TABLE IF NOT EXISTS shop(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,price INT,ts INT,status TEXT DEFAULT 'open',buyer INT);
+CREATE TABLE IF NOT EXISTS duels(id INTEGER PRIMARY KEY AUTOINCREMENT,a INT,aplate TEXT,stake INT,ts INT,status TEXT DEFAULT 'open',b INT,bplate TEXT,winner INT);
 CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id));
 CREATE TABLE IF NOT EXISTS payments(charge TEXT PRIMARY KEY,uid INT,item TEXT,stars INT,ts INT);
 CREATE INDEX IF NOT EXISTS ix_gifts_uid ON gifts(uid);
@@ -54,6 +55,9 @@ CREATE INDEX IF NOT EXISTS ix_auc_open ON auctions(status,end);
 CREATE INDEX IF NOT EXISTS ix_auc_seller ON auctions(seller,status);
 CREATE INDEX IF NOT EXISTS ix_shop_open ON shop(status,id);
 CREATE INDEX IF NOT EXISTS ix_shop_seller ON shop(seller,status);
+CREATE INDEX IF NOT EXISTS ix_duel_open ON duels(status,id);
+CREATE INDEX IF NOT EXISTS ix_duel_a ON duels(a,status);
+CREATE INDEX IF NOT EXISTS ix_duel_b ON duels(b,status);
 CREATE INDEX IF NOT EXISTS ix_uniq_owner ON uniq(owner);
 CREATE INDEX IF NOT EXISTS ix_users_seen ON users(last_seen);
 """
@@ -340,13 +344,40 @@ def poll(b):   # один лёгкий запрос вместо четырёх:
         c.execute("UPDATE users SET last_seen=? WHERE id=?", (int(t), uid)); c.commit()
     return {"gifts": gifts_of(c, uid), "offers": offers_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "ev": event_of(c)}
 
+def uniq_guard(c, uid, st):
+    """Единственные номера (Мифик/Секретный): у каждого - ровно один владелец.
+    Чужой/уже занятый номер в состоянии игрока удаляется, свободный - закрепляется за ним."""
+    dups = []
+    def chk(p):
+        if not isinstance(p, dict): return True
+        try: pp = clean_plate(p)
+        except HTTPException: return True
+        if tier_py(pp) < 4: return True
+        k = ukey(pp)
+        c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (k, uid, int(time.time())))
+        row = c.execute("SELECT owner FROM uniq WHERE key=?", (k,)).fetchone()
+        if row and row["owner"] != uid:
+            dups.append(pp); return False
+        return True
+    col = st.get("col")
+    if isinstance(col, list):
+        st["col"] = [p for p in col if chk(p)]
+    cars = st.get("cars")
+    if isinstance(cars, list):
+        for car in cars:
+            if isinstance(car, dict) and car.get("pl") is not None and not chk(car["pl"]): car["pl"] = None
+    if dups:
+        log.warning("uniq: дубликаты у %s: %s", uid, [ukey(p) for p in dups])
+    return dups
+
 @api("/api/save")
 def save(b):
     uid, _ = auth(b.get("initData")); c = db(); st = b.get("state")
     if not isinstance(st, dict): raise HTTPException(400, "Неверное состояние")
     if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
+    dups = uniq_guard(c, uid, st)
     c.execute("UPDATE users SET state=?,last_seen=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), uid)); c.commit()
-    return {"ok": 1}
+    return {"ok": 1, "dup": dups} if dups else {"ok": 1}
 
 @api("/api/gifts/clear")
 def clear(b):
@@ -480,6 +511,77 @@ STAR_ITEMS = {  # item: (звёзды, название, описание)
     "p500": (500, "Любой номер на выбор", "Номер, который вы выберете сами"),
 }
 
+# ---------------------------------------------------------------- звёзды: пополнение баланса и «звёздная крутка» (единственные номера)
+STAR_RATE = int(os.environ.get("STAR_RATE", "1000000"))   # сколько сум даём за 1 ⭐ (можно поменять в настройках Render: STAR_RATE)
+STAR_MIN, STAR_MAX = 50, 5000                              # пополнение баланса: от 50 ⭐
+STAR_BONUS = [(1000, 25), (250, 10)]                       # от 250 ⭐ +10%, от 1000 ⭐ +25%
+SPIN_PRICE = 15                                            # одна звёздная крутка = 15 ⭐
+SPIN_PACKS = (1, 5, 10)
+SPIN_SECRET = 0.10                                         # шанс Секретного номера; иначе Мифик (оба - единственные в игре)
+
+def star_sum(stars):
+    pct = next((p for lim, p in STAR_BONUS if stars >= lim), 0)
+    return int(stars * STAR_RATE * (100 + pct) / 100)
+
+@api("/api/stars")
+def stars_info(b):
+    auth(b.get("initData"))
+    return {"rate": STAR_RATE, "min": STAR_MIN, "max": STAR_MAX, "bonus": [[lim, p] for lim, p in STAR_BONUS], "spin": SPIN_PRICE,
+            "packs": list(SPIN_PACKS), "secret": int(SPIN_SECRET * 100), "mythic": 100 - int(SPIN_SECRET * 100)}
+
+_PLR = ["01", "10", "20", "25", "30", "40", "50", "60", "70", "75", "80", "85", "90", "95"]
+_ULTRA = [{"k": 1, "r": "01", "d": "879", "z": "MEA"}, {"k": 1, "r": "01", "d": "762", "z": "MMA"}, {"k": 1, "r": "01", "d": "500", "z": "SOO"},
+          {"k": 0, "r": "01", "a": "Z", "d": "777", "z": "ZZ"}, {"k": 0, "r": "01", "a": "O", "d": "001", "z": "OO"}, {"k": 1, "r": "01", "d": "007", "z": "AUB"}]
+
+def _claim(c, uid, p):   # атомарно занять единственный номер: получится только у одного
+    return c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time()))).rowcount == 1
+
+def roll_unique(c, uid):
+    """Выбить свободный единственный номер (Мифик или Секретный) и закрепить его за игроком."""
+    if _RND.random() < SPIN_SECRET:
+        if _RND.random() < 0.3:
+            free = [dict(p) for p in _ULTRA if not c.execute("SELECT 1 FROM uniq WHERE key=?", (ukey(p),)).fetchone()]
+            _RND.shuffle(free)
+            for p in free:
+                if _claim(c, uid, p): return p
+        for _ in range(300):
+            z = _RND.choices(["SBA", "AAA", "UZB"], [40, 40, 20])[0]
+            p = {"k": 1, "r": "01", "d": "%03d" % _RND.randint(1, 999), "z": z}
+            if tier_py(p) == 5 and _claim(c, uid, p): return p
+    for _ in range(600):
+        x = str(_RND.randint(1, 9)); b = _RND.choice(sorted(LETTERS))
+        if _RND.random() < 0.5: p = {"k": 1, "r": _RND.choice(_PLR), "d": x * 3, "z": b * 3}
+        else: p = {"k": 0, "r": "01", "a": _RND.choice(sorted(LETTERS)), "d": x * 3, "z": b * 2}
+        if tier_py(p) == 4 and _claim(c, uid, p): return p
+    return None
+
+def apply_payment(c, d, total, charge):
+    """Выдать оплаченное. Возвращает текст для игрока или None, если платёж уже обработан/неверный."""
+    uid = int(d["u"]); item = d.get("i")
+    try: c.execute("INSERT INTO payments VALUES(?,?,?,?,?)", (charge, uid, item, total, int(time.time())))
+    except sqlite3.IntegrityError: return None
+    msg = "⭐ Оплата получена! Откройте игру: подарок уже там."
+    if item == "b50": gift(c, uid, {"t": "boost", "k": "bl", "v": 120})
+    elif item == "b100":
+        for k in ("bl", "bx", "bs"): gift(c, uid, {"t": "boost", "k": k, "v": 120})
+    elif item == "noads": gift(c, uid, {"t": "noads"})
+    elif item == "p500": gift(c, uid, {"t": "plate", "v": d["p"]})
+    elif item == "bal":
+        st = int(d.get("s", 0))
+        if st != total or not (STAR_MIN <= st <= STAR_MAX): log.error("платёж bal: сумма не сходится %s %s", st, total); c.commit(); return None
+        gift(c, uid, {"t": "bal", "v": star_sum(st)}); msg = "⭐ Оплата получена! На баланс придёт %s сум. Откройте игру." % fnum(star_sum(st))
+    elif item == "spin":
+        n = int(d.get("n", 0))
+        if n not in SPIN_PACKS or total < n * SPIN_PRICE: log.error("платёж spin: неверная сумма %s %s", n, total); c.commit(); return None
+        got = []
+        for _ in range(n):
+            p = roll_unique(c, uid)
+            if p: gift(c, uid, {"t": "plate", "v": p, "src": "spin"}); got.append("%s (%s)" % (plate_txt(p), "Секретный" if tier_py(p) >= 5 else "Мифик"))
+            else: gift(c, uid, {"t": "bal", "v": SPIN_PRICE * STAR_RATE})   # единственные номера закончились - вернём стоимость сумами
+        msg = "🎰 Звёздная крутка! Ваши единственные номера:\n" + "\n".join("🔢 " + x for x in got) + "\nОни уже в игре."
+    c.commit()
+    return msg
+
 def check_plate(p):  # проверка номера, который игрок хочет купить за звёзды
     try:
         k = int(p["k"]); r = str(p["r"]); d = str(p["d"]); z = str(p["z"]).upper(); a = str(p.get("a", "")).upper()
@@ -495,8 +597,18 @@ def check_plate(p):  # проверка номера, который игрок 
 @api("/api/invoice", pool=TGPOOL)
 def invoice(b):
     uid, _ = auth(b.get("initData")); item = b.get("item")
-    if item not in STAR_ITEMS: raise HTTPException(400, "Товар не найден")
-    amount, title, desc = STAR_ITEMS[item]; payload = {"u": uid, "i": item}
+    if item == "bal":
+        try: stars = int(b.get("s", 0))
+        except (TypeError, ValueError): raise HTTPException(400, "Неверная сумма")
+        if not (STAR_MIN <= stars <= STAR_MAX): raise HTTPException(400, "Пополнение от %d до %d ⭐" % (STAR_MIN, STAR_MAX))
+        amount, title, desc = stars, "Пополнение баланса", "%s сум на игровой баланс" % fnum(star_sum(stars)); payload = {"u": uid, "i": item, "s": stars}
+    elif item == "spin":
+        try: n = int(b.get("n", 0))
+        except (TypeError, ValueError): raise HTTPException(400, "Неверное количество")
+        if n not in SPIN_PACKS: raise HTTPException(400, "Неверное количество")
+        amount, title, desc = n * SPIN_PRICE, "Звёздная крутка x%d" % n, "Выпадает единственный в игре номер: Мифик или Секретный"; payload = {"u": uid, "i": item, "n": n}
+    elif item not in STAR_ITEMS: raise HTTPException(400, "Товар не найден")
+    else: amount, title, desc = STAR_ITEMS[item]; payload = {"u": uid, "i": item}
     if item == "p500": payload["p"] = check_plate(b.get("plate") or {})
     pl = json.dumps(payload, separators=(",", ":"))
     try: res = tg_request("createInvoiceLink", {"title": title, "description": desc, "payload": pl, "provider_token": "", "currency": "XTR",
@@ -640,6 +752,87 @@ def shop_cancel(b):
     gift(c, uid, json.loads(o["item"])); c.commit(); _SHOP[0] = 0
     return {"ok": 1}
 
+# ---------------------------------------------------------------- дуэли между игроками (ставка в сумах, исход по классу номеров)
+DUEL_STAKES = (100000, 500000, 2000000, 10000000)
+DUEL_W = [1, 1.6, 2.6, 4.2, 6.5, 9]   # «сила» класса номера: одинаковые классы = 50 на 50, выше класс = больше шанс
+DUEL_TTL = 86400                        # вызов висит сутки, потом ставка возвращается
+_RND = random.SystemRandom()
+_DU = [0, []]
+
+def duel_p(ta, tb):
+    wa, wb = DUEL_W[min(5, max(0, ta))], DUEL_W[min(5, max(0, tb))]
+    return wa / (wa + wb)
+
+def duel_snapshot(c):
+    t = time.time()
+    if t - _DU[0] < 2.0: return _DU[1]
+    rows = c.execute("SELECT d.id,d.a,d.aplate,d.stake,d.ts,u.name FROM duels d LEFT JOIN users u ON u.id=d.a WHERE d.status='open' ORDER BY d.id DESC LIMIT 60").fetchall()
+    _DU[1] = [{"id": r["id"], "a": r["a"], "an": str(r["name"] or "")[:24], "plate": json.loads(r["aplate"]), "stake": r["stake"], "ts": r["ts"]} for r in rows]
+    _DU[0] = t; return _DU[1]
+
+@api("/api/duel/list")
+def duel_list(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    mine = []
+    for r in c.execute("SELECT d.*,ua.name an,ub.name bn FROM duels d LEFT JOIN users ua ON ua.id=d.a LEFT JOIN users ub ON ub.id=d.b "
+                       "WHERE d.status='done' AND (d.a=? OR d.b=?) ORDER BY d.id DESC LIMIT 8", (uid, uid)):
+        me_a = r["a"] == uid
+        mine.append({"id": r["id"], "win": r["winner"] == uid, "stake": r["stake"], "payout": int(r["stake"] * 2 * 0.95),
+                     "opp": json.loads(r["bplate"] if me_a else r["aplate"]), "on": str((r["bn"] if me_a else r["an"]) or "")[:24], "ts": r["ts"]})
+    return {"list": duel_snapshot(c), "mine": mine, "stakes": list(DUEL_STAKES)}
+
+@api("/api/duel/create")
+def duel_create(b):
+    uid, _ = auth(b.get("initData")); c = db(); plate = clean_plate(b.get("plate") or {})
+    try: stake = int(b.get("stake", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверная ставка")
+    if stake not in DUEL_STAKES: raise HTTPException(400, "Неверная ставка")
+    if c.execute("SELECT COUNT(*) FROM duels WHERE a=? AND status='open'", (uid,)).fetchone()[0] >= 3:
+        raise HTTPException(400, "Не больше 3 открытых вызовов")
+    c.execute("INSERT INTO duels(a,aplate,stake,ts) VALUES(?,?,?,?)", (uid, json.dumps(plate), stake, int(time.time()))); c.commit(); _DU[0] = 0
+    return {"ok": 1}
+
+@api("/api/duel/accept")
+def duel_accept(b):
+    uid, uname = auth(b.get("initData")); c = db(); bplate = clean_plate(b.get("plate") or {})
+    try: did = int(b["id"])
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    d = c.execute("SELECT * FROM duels WHERE id=? AND status='open'", (did,)).fetchone()
+    if not d: raise HTTPException(400, "Вызов уже принят или отменён")
+    if d["a"] == uid: raise HTTPException(400, "Нельзя принять свой вызов")
+    if c.execute("UPDATE duels SET status='done',b=?,bplate=? WHERE id=? AND status='open'", (uid, json.dumps(bplate), did)).rowcount != 1:
+        raise HTTPException(400, "Вызов уже принят или отменён")
+    aplate = json.loads(d["aplate"]); pa = duel_p(tier_py(aplate), tier_py(bplate))
+    a_wins = _RND.random() < pa; winner = d["a"] if a_wins else uid; payout = int(d["stake"] * 2 * 0.95)
+    c.execute("UPDATE duels SET winner=? WHERE id=?", (winner, did))
+    gift(c, winner, {"t": "bal", "v": payout}); c.commit(); _DU[0] = 0
+    me = str(uname)[:30] or ("ID %d" % uid)
+    notify(d["a"], "⚔️ Ваш вызов на дуэль принят!\nСтавка: %s сум\nВаш номер %s против %s (%s)\n%s" % (
+        fnum(d["stake"]), plate_txt(aplate), plate_txt(bplate), me,
+        ("🏆 Вы победили! Вам начислено %s сум." % fnum(payout)) if a_wins else ("💥 Вы проиграли, ставка %s сум пропала." % fnum(d["stake"]))), "⚔️ Открыть игру")
+    return {"ok": 1, "win": not a_wins, "payout": payout, "opp": aplate, "chance": round((1 - pa) * 100)}
+
+@api("/api/duel/cancel")
+def duel_cancel(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: did = int(b["id"])
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    d = c.execute("SELECT * FROM duels WHERE id=? AND status='open'", (did,)).fetchone()
+    if not d or d["a"] != uid: raise HTTPException(400, "Вызов недоступен")
+    if c.execute("UPDATE duels SET status='cancelled' WHERE id=? AND status='open'", (did,)).rowcount != 1:
+        raise HTTPException(400, "Вызов уже принят")
+    gift(c, uid, {"t": "bal", "v": d["stake"]}); c.commit(); _DU[0] = 0
+    return {"ok": 1}
+
+def duel_expire(c):   # вызовы, которые никто не принял за сутки: ставка возвращается
+    notes = []
+    for d in c.execute("SELECT * FROM duels WHERE status='open' AND ts<?", (int(time.time()) - DUEL_TTL,)).fetchall():
+        if c.execute("UPDATE duels SET status='expired' WHERE id=? AND status='open'", (d["id"],)).rowcount != 1: continue
+        gift(c, d["a"], {"t": "bal", "v": d["stake"]})
+        notes.append((d["a"], "⌛ Ваш вызов на дуэль никто не принял за сутки.\nСтавка %s сум вернулась на баланс." % fnum(d["stake"]), "⚔️ Открыть игру"))
+    if notes: c.commit(); _DU[0] = 0
+    for n in notes: notify(*n)
+
 # эксклюзивные машины: их нельзя выбить в рулетке, они появляются только как системные лоты аукциона
 EXC = [("Rolls-Royce Spectre", 3.5), ("Lamborghini Aventador SVJ", 3.2), ("Ferrari 812 Superfast", 3), ("Bugatti Veyron", 4),
        ("Porsche Carrera GT", 3.8), ("McLaren P1", 4.5), ("Lamborghini Revuelto", 4)]
@@ -666,6 +859,7 @@ def cleanup(c):   # раз в час: убрать старые закрытые
     old = int(time.time()) - 14 * 86400; n = 0
     n += c.execute("DELETE FROM offers WHERE id IN (SELECT id FROM offers WHERE status!='open' AND ts<? LIMIT 5000)", (old,)).rowcount
     n += c.execute("DELETE FROM auctions WHERE id IN (SELECT id FROM auctions WHERE status!='open' AND end<? LIMIT 5000)", (old,)).rowcount
+    n += c.execute("DELETE FROM duels WHERE id IN (SELECT id FROM duels WHERE status!='open' AND ts<? LIMIT 5000)", (old,)).rowcount
     n += c.execute("DELETE FROM shop WHERE id IN (SELECT id FROM shop WHERE status!='open' AND ts<? LIMIT 5000)", (old,)).rowcount
     c.commit()
     c.execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -728,8 +922,8 @@ def db_report():   # текст для команды /stat в боте
     big = c.execute("SELECT id,length(CAST(state AS BLOB)) l FROM users WHERE state IS NOT NULL ORDER BY l DESC LIMIT 1").fetchone()
     avg = one("SELECT IFNULL(AVG(length(CAST(state AS BLOB))),0) FROM users WHERE state IS NOT NULL")
     out.append("📦 Сохранение игрока: в среднем %d КБ, самое большое %d КБ (ID %s)" % (avg // 1024, (big["l"] if big else 0) // 1024, big["id"] if big else "-"))
-    out.append("🎁 Подарков в очереди: %d · 🤝 открытых обменов: %d · 🔨 открытых лотов: %d · 🔒 единственных номеров: %d · 🛒 на витрине: %d" % (
-        one("SELECT COUNT(*) FROM gifts"), one("SELECT COUNT(*) FROM offers WHERE status='open'"), one("SELECT COUNT(*) FROM auctions WHERE status='open'"), one("SELECT COUNT(*) FROM uniq"), one("SELECT COUNT(*) FROM shop WHERE status='open'")))
+    out.append("🎁 Подарков в очереди: %d · 🤝 открытых обменов: %d · 🔨 открытых лотов: %d · 🔒 единственных номеров: %d · 🛒 на витрине: %d · ⚔️ открытых дуэлей: %d" % (
+        one("SELECT COUNT(*) FROM gifts"), one("SELECT COUNT(*) FROM offers WHERE status='open'"), one("SELECT COUNT(*) FROM auctions WHERE status='open'"), one("SELECT COUNT(*) FROM uniq"), one("SELECT COUNT(*) FROM shop WHERE status='open'"), one("SELECT COUNT(*) FROM duels WHERE status='open'")))
     out.append("🧪 Проверка целостности: %s%s" % (DB_CHECK[0], (" (" + time.strftime("%d.%m %H:%M", time.gmtime(DB_CHECK[1])) + " UTC)") if DB_CHECK[1] else ""))
     fs = _backups()
     if fs:
@@ -755,7 +949,7 @@ def _bg():   # фоновый поток: торги, системные лот�
             except OSError: pass
     last_clean = last_bk = last_chk = 0
     while True:
-        try: c = db(); settle(c); system_lot(c)
+        try: c = db(); settle(c); duel_expire(c); system_lot(c)
         except Exception: log.exception("торги")
         t = time.time()
         if t - last_clean > 3600:
