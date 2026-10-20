@@ -176,7 +176,8 @@ def fnum(n):   # 1 000 000
 def plate_txt(p):
     try:
         r, d, z, a = str(p.get("r", "")), str(p.get("d", "")), str(p.get("z", "")), str(p.get("a") or "")
-        return ("%s %s %s" % (r, d, z)) if p.get("k") else ("%s %s %s %s" % (r, a, d, z))
+        t = ("%s %s %s" % (r, d, z)) if p.get("k") else ("%s %s %s %s" % (r, a, d, z))
+        return t + (" ×%s" % p["m"] if p.get("m") else "")
     except Exception: return "номер"
 
 def item_txt(it):
@@ -254,7 +255,7 @@ def gift(c, uid, d):
     except Exception: pass
 
 UPG_X = (2, 5, 10); UPG_RTP = 0.94; UPG_INS = 29
-UPG_MAXM = 1000                                   # номер можно улучшать снова и снова: множители перемножаются, потолок ×1000
+UPG_MAXM = 32                                   # номер можно улучшать снова и снова: множители перемножаются, потолок ×1000
 def m_ok(m):                                       # допустимый множитель номера: произведение 2, 5 и 10, не больше UPG_MAXM
     if not isinstance(m, int) or m < 2 or m > UPG_MAXM: return False
     for q in (2, 5):
@@ -390,6 +391,31 @@ def bal_backfill():   # один раз: заполнить рейтинг по 
         except Exception: pass
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('bal_bf','1')"); c.commit()
 
+def jump_why(old_json, st, last_seen):   # что изменилось в состоянии игрока между двумя сохранениями: помогает понять, откуда скачок баланса
+    try: o = json.loads(old_json) if old_json else {}
+    except Exception: o = {}
+    lines = []; dt = int(time.time()) - int(last_seen or 0)
+    if last_seen: lines.append("С прошлого сохранения прошло: %s" % (("%d мин" % (dt // 60)) if dt >= 60 else ("%d сек" % dt)))
+    ch = []
+    for k, v in st.items():
+        if k in ("bal", "rid") or isinstance(v, bool) or not isinstance(v, (int, float)): continue
+        ov = o.get(k)
+        if isinstance(ov, (int, float)) and not isinstance(ov, bool) and ov != v and abs(v) < 10 ** 11: ch.append("%s: %s → %s" % (k, fnum(ov), fnum(v)))
+    if ch: lines.append("Изменились счётчики: " + "; ".join(ch[:12]))
+    for k, nm in (("col", "номера в гараже"), ("cars", "машины")):
+        a, b = o.get(k), st.get(k)
+        if isinstance(a, list) and isinstance(b, list) and len(a) != len(b): lines.append("%s: %d → %d" % (nm, len(a), len(b)))
+    try:
+        seen = {json.dumps(x, sort_keys=True) for x in (o.get("col") or [])}
+        new = [x for x in (st.get("col") or []) if isinstance(x, dict) and json.dumps(x, sort_keys=True) not in seen]
+        if new: lines.append("Новые номера: " + ", ".join(plate_txt(x) for x in new[:5]) + (" …" if len(new) > 5 else ""))
+    except Exception: pass
+    sp, sold = (st.get("sp") or 0) - (o.get("sp") or 0), (st.get("sold") or 0) - (o.get("sold") or 0)
+    if sp <= 0 and sold <= 0 and (st.get("bpx") or 0) == (o.get("bpx") or 0): lines.append("❗ Ни круток, ни продаж, ни заданий — похоже на прямую правку баланса (подделка).")
+    elif sold > 0: lines.append("Продаж номеров за это время: %d — возможно, честная продажа дорогого номера." % sold)
+    else: lines.append("Круток за это время: %d" % max(sp, 0))
+    return "\n".join(lines)
+
 _TOP = {"ts": 0, "list": []}
 @api("/api/top")
 def top(b):
@@ -488,11 +514,12 @@ def save(b):
     if not isinstance(st, dict): raise HTTPException(400, "Неверное состояние")
     if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
     dups = uniq_guard(c, uid, st); own = st.pop("_own", 0)
-    try:    # подозрительный скачок баланса за одно сохранение - сообщаем админам (читеры правят состояние игры)
-        old = c.execute("SELECT bal FROM users WHERE id=?", (uid,)).fetchone(); nb = _bal_of(st)
+    try:    # подозрительный скачок баланса за одно сохранение - сообщаем админам с причиной (читеры правят состояние игры)
+        old = c.execute("SELECT bal,state,last_seen FROM users WHERE id=?", (uid,)).fetchone(); nb = _bal_of(st)
         if old and nb - (old["bal"] or 0) > BAL_JUMP and uid not in HIDDEN and time.time() - _JUMP.get(uid, 0) > 3600:
             _JUMP[uid] = time.time(); log.warning("ПОДОЗРЕНИЕ: баланс %s: %s -> %s", uid, old["bal"], nb)
-            for a in HIDDEN: notify(a, "⚠️ Подозрительный скачок баланса\nИгрок ID %s: %s → %s сум" % (uid, fnum(old["bal"] or 0), fnum(nb)), "🎰 Открыть игру")
+            why = jump_why(old["state"], st, old["last_seen"])
+            for a in HIDDEN: notify(a, "⚠️ Подозрительный скачок баланса\nИгрок ID %s: %s → %s сум (+%s)\n\n%s" % (uid, fnum(old["bal"] or 0), fnum(nb), fnum(nb - (old["bal"] or 0)), why), "🎰 Открыть игру")
     except Exception: log.exception("jump check")
     c.execute("UPDATE users SET state=?,last_seen=?,bal=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), _bal_of(st), uid)); c.commit()
     r = {"ok": 1}
