@@ -201,7 +201,7 @@ var TABN=0,DIRTY={},PG={pl:60,car:40,up:80,ps:60};
 function draw(){
  setBal(st.bal);$("lvl").textContent="Ур. "+st.lv;$("str").textContent="🔥 "+st.streak;$("xp").style.width=Math.round(st.xp/need()*100)+"%";$("lt").textContent="Уровень "+st.lv+" · "+st.xp+"/"+need()+" XP";$("lk2").textContent=st.lv<5?"🔒 Улучшенная крутка с 5 ур.":st.lv<7?"🔒 Премиум крутка с 7 ур.":"🍀 Все крутки открыты";
  var n=TK.filter(function(t){return t[1]()}).length;$("tp").textContent=n+"/6";$("tb").style.width=n/6*100+"%";
- $("go").textContent=freeP()?"🎁 Бесплатная крутка · осталось "+st.fp:"Крутить · "+fmt(price());
+ $("go").textContent=busy?"⏩ Пропустить":freeP()?"🎁 Бесплатная крутка · осталось "+st.fp:"Крутить · "+fmt(price());
  $("modes").innerHTML=M.map(function(m,i){var u=st.lv>=m.lv;return '<button data-m="'+i+'" class="md'+(i==mode?' on':'')+(u?'':' lk')+'"><b>'+m.n+'</b><small>'+(u?fmt(m.cost):'🔒 с '+m.lv+' ур.')+'</small><i>'+m.d+'</i></button>'}).join("");
  $("sub").textContent=st.luck?"🍀 Удача ×2 активна":"📢 Подписка → удача ×2";evBanner();
  DIRTY[1]=DIRTY[2]=DIRTY[3]=DIRTY[4]=1;renderTab(TABN)
@@ -242,17 +242,18 @@ $("sh").innerHTML='<div class="sc"><div class="hd">Выберите регион
 $("sh").onclick=function(e){var b=e.target.closest("button");if(b)pick(b.dataset.r);else if(e.target===this)this.hidden=true};
 $("rb").onclick=function(){$("sh").hidden=false};
 
-function reelRun(P,TT,fin){var s=$("stage");s.className="stage spin0";s.innerHTML=plate(P,1);var num=s.querySelector(".num"),R=[];
+var SKIP=null;function reelRun(P,TT,fin){var s=$("stage"),RT=[],dn=0,fin0=fin;fin=function(){if(dn)return;dn=1;SKIP=null;RT.forEach(clearTimeout);fin0()};s.className="stage spin0";s.innerHTML=plate(P,1);var num=s.querySelector(".num"),R=[];
  if(num){var tw=document.createTreeWalker(num,NodeFilter.SHOW_TEXT),nd=[],t;while(t=tw.nextNode())nd.push(t);
   nd.forEach(function(n){var txt=n.nodeValue,fr=document.createDocumentFragment();for(var i=0;i<txt.length;i++){var ch=txt[i];if(/\s/.test(ch)){fr.appendChild(document.createTextNode(ch));continue}var e=document.createElement("i");e.className="rl";e.dataset.c=ch;R.push({e:e,ch:ch,dg:/\d/.test(ch)});fr.appendChild(e)}n.parentNode.replaceChild(fr,n)})}
  R.sort(function(a,b){return a.dg===b.dg?0:a.dg?-1:1});
  var DG="0123456789",LT="ABCDEFGHJKLMNPRSTUVWXYZ",last=0;
  R.forEach(function(r,i){var N=10+i*5,D=.75+i*.42,h="<s>"+r.ch+"</s>",pool=r.dg?DG:LT;for(var k=0;k<N;k++)h+="<s>"+pool[rnd(pool.length)]+"</s>";r.e.innerHTML="<u>"+h+"</u>";var u=r.e.firstChild;u.style.setProperty("--n",N);u.style.setProperty("--d",D+"s");last=Math.max(last,D);
-  setTimeout(function(){r.e.classList.add("lt");beep(520+i*110,.07,"triangle",.12);beep(1040+i*60,.04,"sine",.05,.02);setR(Math.min(Math.floor((i+1)*(Math.min(TT,4)+1)/R.length),Math.min(TT,4)))},D*1000)});
- setTimeout(fin,(R.length?last*1000+380:300))}
+  RT.push(setTimeout(function(){r.e.classList.add("lt");beep(520+i*110,.07,"triangle",.12);beep(1040+i*60,.04,"sine",.05,.02);setR(Math.min(Math.floor((i+1)*(Math.min(TT,4)+1)/R.length),Math.min(TT,4)))},D*1000))});
+ RT.push(setTimeout(fin,(R.length?last*1000+380:300)));
+ SKIP=function(){if(dn)return;R.forEach(function(r){var u=r.e.firstChild;if(u)u.style.animation="none"});setR(Math.min(TT,4));beep(900,.06,"triangle",.1);fin()}}
 $("go").onclick=function(){
- var fr=freeP(),c=fr?0:price();if(busy)return;if(st.bal<c){$("res").className="res c4";$("res").textContent="Не хватает сум — продайте номера";return}
- busy=true;st.bal-=c;if(fr)st.fp--;this.disabled=true;$("res").textContent="";$("stage").classList.add("spin");setR(-1);var n=0,reg=$("rg").value,self=this,PP=luck(kind,reg),TT=tier(PP);
+ var fr=freeP(),c=fr?0:price();if(busy){if(SKIP)SKIP();return}if(st.bal<c){$("res").className="res c4";$("res").textContent="Не хватает сум — продайте номера";return}
+ busy=true;st.bal-=c;if(fr)st.fp--;$("go").textContent="⏩ Пропустить";$("res").textContent="";$("stage").classList.add("spin");setR(-1);var n=0,reg=$("rg").value,self=this,PP=luck(kind,reg),TT=tier(PP);
  var fin=function(){claimRoll(PP,0,function(p){var t=tier(p);pend=p;st.sp++;dq("sp",1);if(t>=2)dq("epic",1);if(p.r=="01")dq("r01",1);st.best=Math.max(st.best,t);if(t==5)st.sec=1;if(kind)st.firm++;
    show(p,"g"+t,1);try{var pl=$("stage").firstChild;pl.classList.add("lnd");pl.style.setProperty("--lc",["#94a3b8","#3b82f6","#a855f7","#f59e0b","#ef4444","#22d3ee"][t])}catch(e){}setR(t);chime(t);if(t==5||(p.k&&SS[p.z]))say(p.k&&SS[p.z]?"Спецсерия "+SS[p.z][0]:"Спецсерия");if(t>=2)burst(t);addXp(10+t*15);window.bpAdd&&bpAdd(10);save();draw();$("res").className="res c"+t;$("res").textContent=NM[t]+(t>1?"! ✨":"")+(t>=4?" 🔒":"")+" · "+REG[p.r]+(p.k&&SS[p.z]?" · "+SS[p.z][0]:(t==5?" · Спецсерия":""))+" · "+sh(val(p));busy=false;showAct()})};
  reelRun(PP,TT,fin);
