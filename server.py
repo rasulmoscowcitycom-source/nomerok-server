@@ -25,6 +25,7 @@ REF_MILESTONES = [(1, 3000000), (3, 10000000), (5, 25000000), (10, 100000000)]  
 HERE = os.path.dirname(os.path.abspath(__file__))
 BK_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
 BK_KEEP = int(os.environ.get("BACKUP_KEEP", "5"))
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMINS", "").replace(";", ",").replace(" ", ",").split(",") if x.strip().isdigit()]
 APP_URL = os.environ.get("APP_URL", "")   # адрес игры (для кнопки «Открыть игру» в сообщениях бота)
 MAX_BODY = 3_000_000   # больше 3 МБ от игрока не принимаем
 
@@ -75,6 +76,17 @@ def init_db():   # один раз при запуске: таблицы, инд
         c.execute("CREATE TABLE IF NOT EXISTS wlog(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,d INT,why TEXT,ts INT)")
         c.execute("CREATE TABLE IF NOT EXISTS star_auc(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open')")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sa_status ON star_auc(status,end)")
+        c.execute("CREATE TABLE IF NOT EXISTS wallets(uid INTEGER PRIMARY KEY,addr TEXT,ts INT)")
+        for q in ("ALTER TABLE users ADD COLUMN mute INT DEFAULT 0", "ALTER TABLE users ADD COLUMN rem INT DEFAULT 0", "ALTER TABLE events ADD COLUMN upg REAL", "ALTER TABLE users ADD COLUMN ton INT DEFAULT 0", "ALTER TABLE wallets ADD COLUMN ver INT DEFAULT 0"):
+            try: c.execute(q)
+            except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE nft ADD COLUMN item TEXT")
+        except sqlite3.OperationalError: pass
+        c.execute("CREATE TABLE IF NOT EXISTS ton_tx(hash TEXT PRIMARY KEY,uid INT,amount INT,src TEXT,ts INT)")
+        c.execute("CREATE TABLE IF NOT EXISTS tlog(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,d INT,why TEXT,ts INT)")
+        c.execute("CREATE TABLE IF NOT EXISTS ton_lot(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,plate TEXT,key TEXT,price INT,status TEXT DEFAULT 'open',buyer INT,ts INT)")
+        c.execute("CREATE TABLE IF NOT EXISTS ton_wd(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,amount INT,addr TEXT,status TEXT DEFAULT 'pending',ts INT)")
+        c.execute("CREATE TABLE IF NOT EXISTS nft(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,key TEXT UNIQUE,plate TEXT,addr TEXT,status TEXT DEFAULT 'pending',link TEXT,ts INT,item TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_users_bal ON users(bal)"); c.execute("CREATE INDEX IF NOT EXISTS ix_pay_uid ON payments(uid)"); c.commit()
     finally: c.close()
 
@@ -239,10 +251,15 @@ def gift(c, uid, d):
         elif d.get("t") == "car" and is_uniq((d.get("v") or {}).get("pl")): uniq_set(c, uid, d["v"]["pl"])
     except Exception: pass
 
+UPG_X = (2, 5, 10); UPG_RTP = 0.94; UPG_INS = 29
 def clean_plate(p):
     try: k = int(p["k"]); r = str(p["r"]); d = str(p["d"]); z = str(p["z"]).upper(); a = str(p.get("a") or "").upper()
     except Exception: raise HTTPException(400, "Неверный номер")
-    return {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
+    o = {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
+    try: m = int(p.get("m") or 0)
+    except (TypeError, ValueError): m = 0
+    if m in UPG_X: o["m"] = m
+    return o
 
 @api("/api/uclaim")
 def uclaim(b):   # игрок выбил номер: если это Мифик/Секретный - закрепить его за собой, если свободен
@@ -251,6 +268,8 @@ def uclaim(b):   # игрок выбил номер: если это Мифик/
     c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time()))); c.commit()   # кто успел первым - тот и владелец
     row = c.execute("SELECT owner FROM uniq WHERE key=?", (ukey(p),)).fetchone()
     if row and row["owner"] != uid: return {"ok": 0, "taken": 1}
+    try: drop_alert(c, uid, p)
+    except Exception: log.exception("drop_alert")
     return {"ok": 1}
 
 @api("/api/urel")
@@ -538,6 +557,328 @@ def offer_cancel(b):
     gift(c, uid, json.loads(o["item"])); c.commit()
     return {"ok": 1}
 
+# ---------------------------------------------------------------- NFT (TON): кошелёк, заявки на вывод номера, метаданные
+import re as _re, html as _html
+TON_RE = _re.compile(r"^((EQ|UQ|kQ|0Q)[A-Za-z0-9_-]{46}|-?[0-9]:[0-9a-fA-F]{64})$")
+NFT_NAMES = {4: "Мифик", 5: "Секретный"}
+
+def nft_title(p): return ("%s %s %s" % (p["d"], p["z"], p["r"])) if p["k"] else ("%s %s %s %s" % (p.get("a", ""), p["d"], p["z"], p["r"]))
+
+@api("/api/wallet")
+def wallet_api(b):
+    uid, _ = auth(b.get("initData")); c = db(); addr = (b.get("addr") or "").strip()
+    if addr:
+        if not TON_RE.match(addr): raise HTTPException(400, "Неверный адрес TON-кошелька")
+        c.execute("INSERT OR REPLACE INTO wallets(uid,addr,ts) VALUES(?,?,?)", (uid, addr, int(time.time()))); c.commit()
+    r = c.execute("SELECT addr FROM wallets WHERE uid=?", (uid,)).fetchone()
+    return {"ok": 1, "addr": r["addr"] if r else ""}
+
+@api("/api/nft/req")
+def nft_req(b):
+    """Вывести Мифик/Секретный номер в NFT: номер блокируется (escrow), админ выпускает NFT в коллекции на кошелёк игрока."""
+    uid, _ = auth(b.get("initData")); c = db(); p = clean_plate(b.get("p") or {})
+    if tier_py(p) < 4: raise HTTPException(400, "В NFT можно вывести только Мифик и Секретные номера")
+    w = c.execute("SELECT addr FROM wallets WHERE uid=?", (uid,)).fetchone()
+    if not w: raise HTTPException(400, "Сначала подключите TON-кошелёк")
+    if c.execute("SELECT COUNT(*) FROM nft WHERE uid=? AND status='pending'", (uid,)).fetchone()[0] >= 5: raise HTTPException(400, "Слишком много необработанных заявок")
+    if c.execute("UPDATE uniq SET owner=-2 WHERE key=? AND owner=?", (ukey(p), uid)).rowcount != 1:
+        c.rollback(); raise HTTPException(400, "Этот единственный номер вам не принадлежит")
+    try: cur = c.execute("INSERT INTO nft(uid,key,plate,addr,ts) VALUES(?,?,?,?,?)", (uid, ukey(p), json.dumps(p), w["addr"], int(time.time())))
+    except sqlite3.IntegrityError:
+        c.rollback(); raise HTTPException(400, "Заявка на этот номер уже есть")
+    c.commit(); nid = cur.lastrowid
+    for a in ADMIN_IDS:
+        notify(a, "💎 Заявка на NFT #%d: %s (%s)\nИгрок %s, кошелёк %s\n/nftdone %d АДРЕС_NFT — выпущено, /nftno %d — отклонить" % (nid, nft_title(p), NFT_NAMES[tier_py(p)], uid, w["addr"], nid, nid))
+    return {"ok": 1, "id": nid}
+
+@api("/api/nft/my")
+def nft_my(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    return {"list": [{"id": r["id"], "plate": json.loads(r["plate"]), "status": r["status"], "link": r["link"], "item": r["item"]} for r in c.execute("SELECT * FROM nft WHERE uid=? ORDER BY id DESC LIMIT 50", (uid,))]}
+
+def nft_svg(p):
+    t = tier_py(p); col = "#ec4899" if t >= 5 else "#f59e0b"
+    num = _html.escape(("%s  %s" % (p["d"], p["z"])) if p["k"] else ("%s %s %s" % (p.get("a", ""), p["d"], p["z"])))
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f172a"/><stop offset="1" stop-color="%s" stop-opacity=".55"/></linearGradient></defs>'
+            '<rect width="600" height="600" fill="url(#g)"/><rect x="40" y="215" width="520" height="170" rx="22" fill="#fff" stroke="#111" stroke-width="8"/>'
+            '<rect x="40" y="215" width="120" height="170" rx="22" fill="#e5e7eb"/><text x="100" y="325" font-family="Arial" font-weight="900" font-size="64" text-anchor="middle" fill="#111">%s</text>'
+            '<text x="370" y="332" font-family="Arial" font-weight="900" font-size="80" text-anchor="middle" fill="#111">%s</text>'
+            '<text x="300" y="150" font-family="Arial" font-weight="900" font-size="34" text-anchor="middle" fill="%s">%s</text>'
+            '<text x="300" y="470" font-family="Arial" font-size="26" text-anchor="middle" fill="#cbd5e1">UZ Номерок · NFT</text></svg>') % (col, _html.escape(str(p["r"])), num, col, NFT_NAMES.get(t, ""))
+
+@app.get("/nft/{name}")
+async def nft_file(r: Request):
+    name = r.path_params["name"]; base = APP_URL.rstrip("/")
+    if name == "collection.json":
+        return Response(json.dumps({"name": "UZ Номерок", "description": "Редкие номерные знаки Узбекистана из игры UZ Номерок: Мифик и Секретные. Каждый номер существует в единственном экземпляре.", "image": base + "/nft/icon.svg"}, ensure_ascii=False), media_type="application/json")
+    if name == "icon.svg":
+        return Response(nft_svg({"k": 1, "r": "01", "d": "777", "z": "UZB"}), media_type="image/svg+xml")
+    m = _re.match(r"^(\d+)\.(json|svg)$", name)
+    if not m: raise HTTPException(404, "нет")
+    row = db().execute("SELECT plate FROM nft WHERE id=?", (int(m.group(1)),)).fetchone()
+    if not row: raise HTTPException(404, "нет")
+    p = json.loads(row["plate"])
+    if m.group(2) == "svg": return Response(nft_svg(p), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
+    return Response(json.dumps({"name": "%s" % nft_title(p), "description": "%s номер Узбекистана из игры UZ Номерок. Единственный экземпляр." % NFT_NAMES[tier_py(p)],
+        "image": "%s/nft/%s.svg" % (base, m.group(1)), "attributes": [{"trait_type": "Редкость", "value": NFT_NAMES[tier_py(p)]}, {"trait_type": "Регион", "value": str(p["r"])}, {"trait_type": "Номер", "value": nft_title(p)}]}, ensure_ascii=False), media_type="application/json")
+
+@app.get("/tonconnect-manifest.json")
+def tc_manifest():
+    base = APP_URL.rstrip("/")
+    return Response(json.dumps({"url": base, "name": "UZ Номерок", "iconUrl": base + "/nft/icon.svg"}), media_type="application/json", headers={"Access-Control-Allow-Origin": "*"})
+
+# ---------------------------------------------------------------- TON: пополнение, продажа номеров за TON, вывод, возврат NFT
+import base64 as _b64, decimal as _dec
+TON_WALLET = os.environ.get("TON_WALLET", "").strip()                          # адрес кошелька игры (куда игроки шлют TON и NFT)
+TON_API = os.environ.get("TON_API", "https://toncenter.com/api/v3").rstrip("/")
+TON_KEY = os.environ.get("TON_API_KEY", "")
+NANO = 10 ** 9; TON_FEE = 5; TON_MIN_DEP = NANO // 20; TON_MIN_WD = NANO // 2; TON_MIN_LOT = NANO // 10; TON_MAX_LOT = 100000 * NANO
+try: TON_STAR_RATE = max(1, int(os.environ.get("TON_STAR_RATE", "150")))      # сколько ⭐ даётся за 1 TON
+except ValueError: TON_STAR_RATE = 150
+
+def raw_addr(a):
+    """любой формат адреса TON -> 'wc:hex' (для сравнения)"""
+    a = (a or "").strip()
+    if _re.match(r"^-?[0-9]:[0-9a-fA-F]{64}$", a): return a.lower()
+    try:
+        b = _b64.urlsafe_b64decode(a + "=" * (-len(a) % 4))
+        if len(b) == 36: return "%d:%s" % (b[1] if b[1] < 128 else b[1] - 256, b[2:34].hex())
+    except Exception: pass
+    return ""
+
+def _crc16(d):
+    c = 0
+    for x in d:
+        c ^= x << 8
+        for _ in range(8): c = ((c << 1) ^ 0x1021) & 0xFFFF if c & 0x8000 else (c << 1) & 0xFFFF
+    return c
+
+def friendly_addr(raw):   # 'wc:hex' -> UQ... (не bounceable)
+    try:
+        wc, h = raw.split(":"); b = bytes([0x51, int(wc) & 0xFF]) + bytes.fromhex(h); b += _crc16(b).to_bytes(2, "big")
+        return _b64.urlsafe_b64encode(b).decode()
+    except Exception: return raw
+
+def ton_get(path, params):
+    url = TON_API + path + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"X-API-Key": TON_KEY} if TON_KEY else {})
+    with urllib.request.urlopen(req, timeout=10) as r: return json.load(r)
+
+def ton_of(c, uid):
+    r = c.execute("SELECT COALESCE(ton,0) FROM users WHERE id=?", (uid,)).fetchone(); return int(r[0]) if r else 0
+def tadd(c, uid, n, why):
+    c.execute("UPDATE users SET ton=COALESCE(ton,0)+? WHERE id=?", (int(n), uid)); c.execute("INSERT INTO tlog(uid,d,why,ts) VALUES(?,?,?,?)", (uid, int(n), why, int(time.time())))
+def tspend(c, uid, n, why):
+    n = int(n)
+    if n <= 0 or c.execute("UPDATE users SET ton=ton-? WHERE id=? AND COALESCE(ton,0)>=?", (n, uid, n)).rowcount != 1:
+        c.rollback(); raise HTTPException(400, "Не хватает TON на балансе")
+    c.execute("INSERT INTO tlog(uid,d,why,ts) VALUES(?,?,?,?)", (uid, -n, why, int(time.time())))
+
+_TP = [0.0]; _TLOCK = threading.Lock()
+def ton_poll(force=False):
+    """Забрать входящие переводы на кошелёк игры и зачислить те, где в комментарии uz<ID>."""
+    if not TON_WALLET: return 0
+    if not _TLOCK.acquire(blocking=False): return 0
+    try:
+        if not force and time.time() - _TP[0] < 8: return 0
+        _TP[0] = time.time(); n = 0
+        d = ton_get("/transactions", {"account": TON_WALLET, "limit": 40, "sort": "desc"}); c = db()
+        for tx in d.get("transactions", []):
+            m = tx.get("in_msg") or {}; src = m.get("source")
+            if not src: continue
+            try: val = int(m.get("value") or 0)
+            except (TypeError, ValueError): continue
+            cm = ((m.get("message_content") or {}).get("decoded") or {}).get("comment") or ""
+            mm = _re.match(r"^\s*uz(\d+)\s*$", cm)
+            if not mm or val < TON_MIN_DEP or not tx.get("hash"): continue
+            if ((tx.get("description") or {}).get("aborted")): continue
+            uid = int(mm.group(1))
+            if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone(): continue
+            if c.execute("INSERT OR IGNORE INTO ton_tx(hash,uid,amount,src,ts) VALUES(?,?,?,?,?)", (tx["hash"], uid, val, src, int(time.time()))).rowcount != 1: continue
+            tadd(c, uid, val, "deposit"); sr = friendly_addr(raw_addr(src)) or src
+            c.execute("INSERT OR REPLACE INTO wallets(uid,addr,ts,ver) VALUES(?,?,?,1)", (uid, sr, int(time.time()))); c.commit(); n += 1
+            notify(uid, "💎 Зачислено %.2f TON на ваш баланс" % (val / NANO))
+        return n
+    finally: _TLOCK.release()
+
+def ton_fee(price): return price * TON_FEE // 100
+
+@api("/api/ton/info")
+def ton_info(b):
+    uid, _ = auth(b.get("initData")); c = db(); w = c.execute("SELECT addr,ver FROM wallets WHERE uid=?", (uid,)).fetchone()
+    return {"ok": 1, "on": bool(TON_WALLET), "wallet": friendly_addr(raw_addr(TON_WALLET)) if TON_WALLET else "", "memo": "uz%d" % uid, "ton": ton_of(c, uid), "rate": TON_STAR_RATE,
+            "fee": TON_FEE, "mindep": TON_MIN_DEP, "minwd": TON_MIN_WD, "minlot": TON_MIN_LOT, "addr": w["addr"] if w else "", "ver": bool(w and w["ver"]),
+            "wd": [dict(r) for r in c.execute("SELECT id,amount,status FROM ton_wd WHERE uid=? ORDER BY id DESC LIMIT 5", (uid,))]}
+
+_TCK = {}
+@api("/api/ton/check")
+def ton_check(b):   # «я оплатил»: проверить поступления сейчас
+    uid, _ = auth(b.get("initData")); t = time.time()
+    if t - _TCK.get(uid, 0) < 5: raise HTTPException(429, "Подождите несколько секунд")
+    _TCK[uid] = t
+    try: ton_poll(True)
+    except Exception as e: log.warning("ton_poll: %s", e); raise HTTPException(502, "Не удалось связаться с сетью TON, попробуйте позже")
+    return {"ok": 1, "ton": ton_of(db(), uid)}
+
+@api("/api/ton/tostars")
+def ton_tostars(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: n = int(b.get("s", 0))
+    except (TypeError, ValueError): n = 0
+    if n < 10 or n > 10000: raise HTTPException(400, "От 10 до 10 000 ⭐")
+    cost = -(-n * NANO // TON_STAR_RATE)
+    tspend(c, uid, cost, "tostars"); wadd(c, uid, n, "ton"); c.commit()
+    return {"ok": 1, "ton": ton_of(c, uid), "stars": wallet_of(c, uid)}
+
+@api("/api/ton/wd")
+def ton_wd(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: n = int(round(float(b.get("ton", 0)) * NANO))
+    except (TypeError, ValueError): n = 0
+    if n < TON_MIN_WD: raise HTTPException(400, "Минимум для вывода %.1f TON" % (TON_MIN_WD / NANO))
+    w = c.execute("SELECT addr,ver FROM wallets WHERE uid=?", (uid,)).fetchone()
+    if not w or not w["ver"]: raise HTTPException(400, "Вывод доступен на кошелёк, с которого вы пополняли баланс. Сначала пополните баланс (от 0.05 TON) со своего кошелька")
+    if c.execute("SELECT COUNT(*) FROM ton_wd WHERE uid=? AND status='pending'", (uid,)).fetchone()[0] >= 3: raise HTTPException(400, "Слишком много необработанных заявок")
+    tspend(c, uid, n, "withdraw")
+    cur = c.execute("INSERT INTO ton_wd(uid,amount,addr,ts) VALUES(?,?,?,?)", (uid, n, w["addr"], int(time.time()))); c.commit()
+    for a in ADMIN_IDS: notify(a, "💸 Заявка на вывод #%d: %.3f TON, игрок %s\nКошелёк: %s\n/tonpaid %d — выплачено, /tonno %d — отклонить (вернуть на баланс)" % (cur.lastrowid, n / NANO, uid, w["addr"], cur.lastrowid, cur.lastrowid))
+    return {"ok": 1, "ton": ton_of(c, uid), "id": cur.lastrowid}
+
+def _tl_row(r): return {"id": r["id"], "plate": json.loads(r["plate"]), "price": r["price"], "seller": r["seller"], "sn": r["sn"]}
+@api("/api/tl/list")
+def tl_list(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    rows = c.execute("SELECT l.*,u.name sn FROM ton_lot l LEFT JOIN users u ON u.id=l.seller WHERE l.status='open' ORDER BY l.id DESC LIMIT 100").fetchall()
+    return {"ok": 1, "list": [_tl_row(r) for r in rows], "ton": ton_of(c, uid)}
+
+@api("/api/tl/create")
+def tl_create(b):
+    uid, _ = auth(b.get("initData")); c = db(); p = clean_plate(b.get("plate") or {})
+    if tier_py(p) < 4: raise HTTPException(400, "За TON продаются только Мифик и Секретные номера")
+    try: price = int(round(float(b.get("price", 0)) * NANO))
+    except (TypeError, ValueError): price = 0
+    if price < TON_MIN_LOT or price > TON_MAX_LOT: raise HTTPException(400, "Цена от %.1f TON" % (TON_MIN_LOT / NANO))
+    if c.execute("SELECT COUNT(*) FROM ton_lot WHERE seller=? AND status='open'", (uid,)).fetchone()[0] >= 10: raise HTTPException(400, "Не больше 10 лотов")
+    if c.execute("UPDATE uniq SET owner=-3 WHERE key=? AND owner=?", (ukey(p), uid)).rowcount != 1:
+        c.rollback(); raise HTTPException(400, "Этот единственный номер вам не принадлежит")
+    cur = c.execute("INSERT INTO ton_lot(seller,plate,key,price,ts) VALUES(?,?,?,?,?)", (uid, json.dumps(p), ukey(p), price, int(time.time()))); c.commit()
+    return {"ok": 1, "id": cur.lastrowid}
+
+@api("/api/tl/buy")
+def tl_buy(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: lid = int(b.get("id", 0)); exp = int(b.get("price", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверный лот")
+    r = c.execute("SELECT * FROM ton_lot WHERE id=? AND status='open'", (lid,)).fetchone()
+    if not r: raise HTTPException(400, "Лот уже продан или снят")
+    if r["seller"] == uid: raise HTTPException(400, "Нельзя купить свой лот")
+    if exp != r["price"]: raise HTTPException(400, "Цена изменилась, обновите список")
+    tspend(c, uid, r["price"], "buy")
+    if c.execute("UPDATE ton_lot SET status='sold',buyer=? WHERE id=? AND status='open'", (uid, lid)).rowcount != 1:
+        c.rollback(); raise HTTPException(400, "Лот уже продан или снят")
+    fee = ton_fee(r["price"]); tadd(c, r["seller"], r["price"] - fee, "sale"); gift(c, uid, {"t": "plate", "v": json.loads(r["plate"])}); c.commit()
+    notify(r["seller"], "💎 Ваш номер продан за %.2f TON (комиссия %d%%). На балансе +%.2f TON" % (r["price"] / NANO, TON_FEE, (r["price"] - fee) / NANO))
+    return {"ok": 1, "ton": ton_of(c, uid)}
+
+@api("/api/tl/cancel")
+def tl_cancel(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: lid = int(b.get("id", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверный лот")
+    r = c.execute("SELECT * FROM ton_lot WHERE id=? AND seller=? AND status='open'", (lid, uid)).fetchone()
+    if not r or c.execute("UPDATE ton_lot SET status='cancelled' WHERE id=? AND status='open'", (lid,)).rowcount != 1: raise HTTPException(400, "Лот не найден")
+    gift(c, uid, {"t": "plate", "v": json.loads(r["plate"])}); c.commit(); return {"ok": 1}
+
+@api("/api/nft/return")
+def nft_return(b):
+    """Вернуть NFT в игру: игрок отправляет NFT на кошелёк игры со своего (подтверждённого) кошелька, мы проверяем это в блокчейне."""
+    uid, _ = auth(b.get("initData")); c = db()
+    try: nid = int(b.get("id", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверный NFT")
+    r = c.execute("SELECT * FROM nft WHERE id=? AND uid=? AND status='minted'", (nid, uid)).fetchone()
+    if not r: raise HTTPException(400, "NFT не найден")
+    if not r["item"]: raise HTTPException(400, "Админ ещё не указал адрес этого NFT")
+    if not TON_WALLET: raise HTTPException(400, "Возврат NFT пока не настроен")
+    w = c.execute("SELECT addr,ver FROM wallets WHERE uid=?", (uid,)).fetchone()
+    if not w or not w["ver"]: raise HTTPException(400, "Сначала подтвердите кошелёк: пополните баланс (от 0.05 TON) со своего кошелька")
+    mine, game = raw_addr(w["addr"]), raw_addr(TON_WALLET)
+    try:
+        it = (ton_get("/nft/items", {"address": r["item"], "limit": 1}).get("nft_items") or [None])[0]
+        tr = ton_get("/nft/transfers", {"item_address": r["item"], "direction": "in", "limit": 10, "sort": "desc"}).get("nft_transfers") or []
+    except Exception as e:
+        log.warning("nft_return: %s", e); raise HTTPException(502, "Не удалось связаться с сетью TON, попробуйте позже")
+    if not it or raw_addr(it.get("owner_address")) != game: raise HTTPException(400, "NFT ещё не получен игрой. Отправьте его на адрес %s и подождите минуту" % friendly_addr(game))
+    if not any(raw_addr(t.get("new_owner")) == game and raw_addr(t.get("old_owner")) == mine for t in tr[:5]):
+        raise HTTPException(400, "NFT пришёл с другого кошелька, не с вашего. Обратитесь к администратору")
+    p = json.loads(r["plate"])
+    if c.execute("UPDATE nft SET status='returned',key=key||'#r'||id WHERE id=? AND status='minted'", (nid,)).rowcount != 1: raise HTTPException(400, "Уже возвращён")
+    c.execute("UPDATE uniq SET owner=? WHERE key=? AND owner=-2", (uid, ukey(p))); gift(c, uid, {"t": "plate", "v": p}); c.commit()
+    return {"ok": 1}
+
+# ---------------------------------------------------------------- рассылки от бота: напоминания, ивенты, оповещения
+TZ_OFF = 5 * 3600   # Ташкент
+def push_users(c, where, args, text, btn="🎰 Открыть игру", limit=5000):
+    for r in c.execute("SELECT id FROM users WHERE COALESCE(mute,0)=0 AND " + where + " LIMIT ?", tuple(args) + (limit,)).fetchall(): notify(r[0], text, btn)
+
+def _meta_get(c, k):
+    r = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone(); return r[0] if r else None
+def _meta_set(c, k, v): c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (k, str(v))); c.commit()
+
+DAILY_TXT = ["🎁 Ежедневный подарок ждёт! Заходи и забери — серия растёт, награды больше.",
+             "🔥 Не прерывай серию! Забери сегодняшний подарок в UZ Номерок.",
+             "🎰 Бесплатная крутка и подарок дня ждут тебя. Заходи!",
+             "💎 Мифик и Секретные номера теперь NFT на TON. Заходи за подарком дня — вдруг выпадет редкий!",
+             "🚗 Сегодня твой день: забери подарок и попробуй выбить редкий номер!"]
+def daily_reminders(c):
+    """Раз в день каждому игроку, который сегодня ещё не заходил: напоминание о подарке. Время у каждого своё (10-21 по Ташкенту)."""
+    lt = time.gmtime(time.time() + TZ_OFF); day = int((time.time() + TZ_OFF) // 86400); hour = lt.tm_hour
+    if hour < 10 or hour > 22: return 0
+    t0 = day * 86400 - TZ_OFF; n = 0
+    rows = c.execute("SELECT id FROM users WHERE COALESCE(mute,0)=0 AND COALESCE(rem,0)<? AND last_seen>=? AND last_seen<? AND (10 + ((id*31 + ?)%12))<=? LIMIT 400",
+                     (day, t0 - 30 * 86400, t0, day * 17, hour)).fetchall()
+    for r in rows:
+        c.execute("UPDATE users SET rem=? WHERE id=?", (day, r[0])); notify(r[0], DAILY_TXT[(day + r[0]) % len(DAILY_TXT)], "🎁 Забрать подарок"); n += 1
+    c.commit(); return n
+
+WEEKEND_EVENT = {"luck": 1.5, "sell": 1.0, "xp": 2.0, "upg": 1.0}
+def weekend_event(c):
+    """Суббота и воскресенье: автоматический ивент (удача ×1.5, опыт ×2, апгрейд без потерь в среднем), если админ не запустил свой."""
+    lt = time.gmtime(time.time() + TZ_OFF)
+    if lt.tm_wday not in (5, 6): return
+    now = int(time.time())
+    key = "wk%d" % ((now + TZ_OFF) // 86400 - lt.tm_wday)   # номер недели
+    if _meta_get(c, key) or c.execute("SELECT 1 FROM events WHERE until>?", (now,)).fetchone(): return
+    until = ((now + TZ_OFF) // 86400 + (7 - lt.tm_wday)) * 86400 - TZ_OFF   # понедельник 00:00
+    c.execute("DELETE FROM events"); c.execute("INSERT INTO events(name,luck,sell,xp,until,upg) VALUES(?,?,?,?,?,?)", ("Выходные", WEEKEND_EVENT["luck"], WEEKEND_EVENT["sell"], WEEKEND_EVENT["xp"], until, WEEKEND_EVENT["upg"]))
+    c.commit(); _meta_set(c, key, now); _EVC[0] = 0
+    push_users(c, "last_seen>?", (now - 14 * 86400,), "🎉 Выходные в UZ Номерок! Удача ×1.5, опыт ×2 и апгрейд с повышенным шансом — до понедельника. Заходи!")
+
+def drop_alert(c, uid, p):
+    """Кто-то выбил Мифик/Секретный: сообщить остальным (не чаще раза в 30 минут на всю игру)."""
+    now = int(time.time()); last = int(_meta_get(c, "dropnote") or 0)
+    if now - last < 1800: return
+    _meta_set(c, "dropnote", now); u = c.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+    t = tier_py(p); txt = "🔥 Игрок %s (ID %d) выбил %s номер %s! Заходи и ты — твой шанс тоже рядом." % (((u["name"] if u else "") or "Игрок"), uid, "СЕКРЕТНЫЙ" if t >= 5 else "МИФИЧЕСКИЙ", nft_title(p))
+    push_users(c, "last_seen>? AND id!=?", (now - 3 * 86400, uid), txt)
+
+@api("/api/send")
+def send_plate(b):
+    """Передать Мифик/Секретный номер другому игроку по ID (только такие номера: их принадлежность проверяет сервер)."""
+    uid, _ = auth(b.get("initData")); c = db(); p = clean_plate(b.get("p") or {})
+    try: to = int(b.get("to", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверный ID")
+    if tier_py(p) < 4: raise HTTPException(400, "Передавать можно Мифик и Секретные номера")
+    if to == uid or not c.execute("SELECT 1 FROM users WHERE id=?", (to,)).fetchone(): raise HTTPException(400, "Игрок с таким ID не найден")
+    day = int(time.time() // 86400)
+    if c.execute("SELECT COUNT(*) FROM tlog WHERE uid=? AND why='send' AND ts>?", (uid, int(time.time()) - 86400)).fetchone()[0] >= 20: raise HTTPException(400, "Не больше 20 передач в сутки")
+    if c.execute("UPDATE uniq SET owner=? WHERE key=? AND owner=?", (to, ukey(p), uid)).rowcount != 1:
+        c.rollback(); raise HTTPException(400, "Этот единственный номер вам не принадлежит")
+    c.execute("INSERT INTO tlog(uid,d,why,ts) VALUES(?,0,'send',?)", (uid, int(time.time())))
+    gift(c, to, {"t": "plate", "v": p}); c.commit()
+    me = c.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+    notify(to, "🎁 Игрок %s (ID %d) передал вам номер %s! Он уже в гараже." % (((me["name"] if me else "") or "Игрок"), uid, nft_title(p)))
+    return {"ok": 1}
+
 os.makedirs(os.path.join(HERE, "cars"), exist_ok=True)
 
 class CarFiles(StaticFiles):   # фото машин кэшируются в телефоне на неделю
@@ -602,7 +943,7 @@ BLOCK = {"PAA", "PSS", "PPP", "APC", "TSS", "TST", "ZDF", "DXA", "FVV", "VSB", "
 STAR_ITEMS = {  # item: (звёзды, название, описание)
     "b50": (50, "Удача x2 на 2 часа", "Повышенный шанс на хорошие номера на 2 часа"),
     "b100": (100, "Набор бустов на 2 часа", "Удача x2, опыт x2 и бонус продажи +25% на 2 часа"),
-    "noads": (150, "Отключить рекламу", "Убрать рекламный баннер в игре навсегда"),
+    "noads": (99, "Отключить рекламу", "Убрать рекламный баннер в игре навсегда"),
     "p500": (500, "Любой номер на выбор", "Номер, который вы выберете сами"),
 }
 
@@ -836,6 +1177,25 @@ def auc_cancel(b):   # продавец снимает свой лот, если
     return {"ok": 1}
 
 # ---------------------------------------------------------------- покупки за звёздный баланс
+@api("/api/upg")
+def upg(b):
+    """Апгрейд-колесо: выбираем множитель х2/х5/х10, шанс = 94%/множитель. Выигрыш - стоимость номера растёт, проигрыш - номер сгорает
+    (со страховкой за ⭐ номер остаётся). Бросок делает сервер."""
+    uid, _ = auth(b.get("initData")); c = db(); p = clean_plate(b.get("p") or {})
+    try: x = int(b.get("x", 0))
+    except (TypeError, ValueError): x = 0
+    if x not in UPG_X: raise HTTPException(400, "Неверный множитель")
+    if p.get("m"): raise HTTPException(400, "Этот номер уже улучшен")
+    need_own(c, uid, p)
+    ins = bool(b.get("ins"))
+    if ins: wspend(c, uid, UPG_INS, "upg-ins")
+    rtp = float(event_of(c).get("upg") or UPG_RTP); ch = min(.95, round(rtp / x * 1000) / 1000)
+    win = random.SystemRandom().random() < ch
+    if not win and not ins and tier_py(p) >= 4:
+        c.execute("UPDATE uniq SET owner=0 WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()
+    c.commit()
+    return {"ok": 1, "win": win, "ch": ch, "ins": ins, "stars": stars_of(c, uid)}
+
 @api("/api/wbuy")
 def wbuy(b):
     """Купить что-то за ⭐ со звёздного баланса (пополнение баланса - отдельная оплата через Telegram)."""
@@ -1100,6 +1460,8 @@ def system_lot(c):
         item = {"t": "car", "v": {"n": n, "e": "🏎️", "t": 3, "m": m, "pl": None}}; start = int(30000000 * m * 0.5 / 1000) * 1000
     c.execute("INSERT INTO auctions(seller,item,start,end) VALUES(0,?,?,?)", (json.dumps(item, ensure_ascii=False), start, now + 600))
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('syslot',?)", (str(now),)); c.commit(); _AUC[0] = 0
+    try: push_users(c, "last_seen>?", (now - 7 * 86400,), "🔨 Эксклюзивный аукцион! %s %s — торги идут 10 минут. Заходи, пока не ушёл!" % (item["v"]["e"], item["v"]["n"]), "🔨 К аукциону")
+    except Exception: log.exception("push syslot")
 
 # ---------------------------------------------------------------- уход за базой: чистка, копии, проверка, отчёт
 def cleanup(c):   # раз в час: убрать старые закрытые обмены и торги, не раздувать базу
@@ -1200,6 +1562,10 @@ def _bg():   # фоновый поток: торги, системные лот�
     while True:
         try: c = db(); settle(c); sa_settle(c); duel_expire(c); system_lot(c)
         except Exception: log.exception("торги")
+        try: weekend_event(c); daily_reminders(c)
+        except Exception: log.exception("рассылки")
+        try: ton_poll()
+        except Exception as e: log.debug("ton_poll: %s", e)
         t = time.time()
         if t - last_clean > 3600:
             last_clean = t

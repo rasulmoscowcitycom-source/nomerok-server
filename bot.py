@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, apply_payment
+from server import db, gift, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, apply_payment
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -298,18 +298,96 @@ async def event(u, ctx):
         c.execute("DELETE FROM events"); c.commit(); return await u.message.reply_text("Ивент остановлен")
     plain = [x for x in a if "=" not in x]
     if not plain or not plain[0].isdigit():
-        return await u.message.reply_text("/event luck=3 sell=2 xp=2 МИНУТЫ [название]\nнапример: /event luck=3 60 Выходные\n/event stop")
+        return await u.message.reply_text("/event luck=3 sell=2 xp=2 upg=1 МИНУТЫ [название]\nнапример: /event luck=3 60 Выходные\n/event stop")
     kv = {x.split("=")[0]: float(x.split("=")[1]) for x in a if "=" in x}
     c.execute("DELETE FROM events")
-    c.execute("INSERT INTO events(name,luck,sell,xp,until) VALUES(?,?,?,?,?)",
-              (" ".join(plain[1:]) or "Ивент", kv.get("luck", 1), kv.get("sell", 1), kv.get("xp", 1), int(time.time()) + int(plain[0]) * 60)); c.commit()
+    c.execute("INSERT INTO events(name,luck,sell,xp,until,upg) VALUES(?,?,?,?,?,?)",
+              (" ".join(plain[1:]) or "Ивент", kv.get("luck", 1), kv.get("sell", 1), kv.get("xp", 1), int(time.time()) + int(plain[0]) * 60, kv.get("upg"))); c.commit()
     await u.message.reply_text("Ивент запущен")
+
+@admin
+async def nftlist(u, ctx):  # /nftlist - необработанные заявки на NFT
+    rows = db().execute("SELECT * FROM nft WHERE status='pending' ORDER BY id LIMIT 30").fetchall()
+    if not rows: return await u.message.reply_text("Заявок на NFT нет")
+    await u.message.reply_text("\n".join("#%d  %s  игрок %s\n%s" % (r["id"], json.loads(r["plate"])["d"] + " " + json.loads(r["plate"])["z"] + " " + json.loads(r["plate"])["r"], r["uid"], r["addr"]) for r in rows))
+
+@admin
+async def nftdone(u, ctx):  # /nftdone ID АДРЕС_NFT [ссылка] - NFT выпущен на кошелёк игрока (адрес нужен для возврата в игру)
+    try: nid = int(ctx.args[0]); rest = ctx.args[1:]
+    except Exception: return await u.message.reply_text("Использование: /nftdone ID АДРЕС_NFT [ссылка]\nАдрес NFT-предмета нужен, чтобы игрок мог вернуть номер в игру")
+    item = next((x for x in rest if raw_addr(x)), ""); link = next((x for x in rest if x != item), "")
+    c = db(); r = c.execute("SELECT * FROM nft WHERE id=? AND status='pending'", (nid,)).fetchone()
+    if not r: return await u.message.reply_text("Заявка не найдена или уже обработана")
+    c.execute("UPDATE nft SET status='minted',link=?,item=? WHERE id=?", (link, item, nid)); c.commit()
+    notify(r["uid"], "💎 Ваш NFT выпущен и отправлен на кошелёк!" + ("\n" + link if link else ""))
+    await u.message.reply_text("Готово, игрок уведомлён" + ("" if item else "\n⚠️ Адрес NFT не указан — вернуть в игру он не сможет, пока не добавите"))
+
+@admin
+async def nftitem(u, ctx):  # /nftitem ID АДРЕС_NFT - дописать адрес NFT к уже выпущенному
+    try: nid = int(ctx.args[0]); item = ctx.args[1]
+    except Exception: return await u.message.reply_text("Использование: /nftitem ID АДРЕС_NFT")
+    if not raw_addr(item): return await u.message.reply_text("Это не адрес TON")
+    c = db(); c.execute("UPDATE nft SET item=? WHERE id=?", (item, nid)); c.commit(); await u.message.reply_text("Сохранено")
+
+@admin
+async def addton(u, ctx):  # /addton ID N - выдать TON на баланс (минус - забрать)
+    try: uid = int(ctx.args[0]); n = int(round(float(ctx.args[1]) * NANO))
+    except Exception: return await u.message.reply_text("Использование: /addton ID N (например /addton 123 1.5; с минусом - забрать)")
+    c = db()
+    if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone(): return await u.message.reply_text("Игрок не найден")
+    if n < 0: n = -min(-n, ton_of(c, uid))
+    tadd(c, uid, n, "admin"); c.commit(); await u.message.reply_text("Теперь у игрока %.3f TON" % (ton_of(c, uid) / NANO))
+
+@admin
+async def tonwd(u, ctx):  # /tonwd - заявки на вывод TON
+    rows = db().execute("SELECT * FROM ton_wd WHERE status='pending' ORDER BY id LIMIT 30").fetchall()
+    if not rows: return await u.message.reply_text("Заявок на вывод нет")
+    await u.message.reply_text("\n\n".join("#%d  %.3f TON  игрок %s\n%s" % (r["id"], r["amount"] / NANO, r["uid"], r["addr"]) for r in rows) + "\n\n/tonpaid ID — выплачено, /tonno ID — отклонить")
+
+@admin
+async def tonpaid(u, ctx):  # /tonpaid ID - вы отправили TON игроку вручную
+    try: i = int(ctx.args[0])
+    except Exception: return await u.message.reply_text("Использование: /tonpaid ID")
+    c = db(); r = c.execute("SELECT * FROM ton_wd WHERE id=? AND status='pending'", (i,)).fetchone()
+    if not r: return await u.message.reply_text("Заявка не найдена или уже обработана")
+    c.execute("UPDATE ton_wd SET status='paid' WHERE id=?", (i,)); c.commit(); notify(r["uid"], "💸 Вывод %.3f TON выплачен на ваш кошелёк" % (r["amount"] / NANO)); await u.message.reply_text("Отмечено как выплаченное")
+
+@admin
+async def tonno(u, ctx):  # /tonno ID - отклонить вывод, TON возвращаются на баланс
+    try: i = int(ctx.args[0])
+    except Exception: return await u.message.reply_text("Использование: /tonno ID")
+    c = db(); r = c.execute("SELECT * FROM ton_wd WHERE id=? AND status='pending'", (i,)).fetchone()
+    if not r: return await u.message.reply_text("Заявка не найдена или уже обработана")
+    c.execute("UPDATE ton_wd SET status='rejected' WHERE id=?", (i,)); tadd(c, r["uid"], r["amount"], "wd-refund"); c.commit(); notify(r["uid"], "Вывод отклонён, TON вернулись на баланс"); await u.message.reply_text("Отклонено, TON возвращены")
+
+@admin
+async def tonstat(u, ctx):  # /tonstat - сколько TON игроки держат на балансах (ваш долг) и ждут на вывод
+    c = db(); held = c.execute("SELECT COALESCE(SUM(ton),0) FROM users").fetchone()[0]; wd = c.execute("SELECT COALESCE(SUM(amount),0) FROM ton_wd WHERE status='pending'").fetchone()[0]
+    dep = c.execute("SELECT COALESCE(SUM(amount),0) FROM ton_tx").fetchone()[0]
+    await u.message.reply_text("Принято депозитов: %.3f TON\nНа балансах игроков: %.3f TON\nЖдёт вывода: %.3f TON\nНа кошельке игры должно быть не меньше суммы балансов и заявок." % (dep / NANO, held / NANO, wd / NANO))
+
+@admin
+async def nftno(u, ctx):  # /nftno ID - отклонить заявку, номер возвращается игроку
+    try: nid = int(ctx.args[0])
+    except Exception: return await u.message.reply_text("Использование: /nftno ID")
+    c = db(); r = c.execute("SELECT * FROM nft WHERE id=? AND status='pending'", (nid,)).fetchone()
+    if not r: return await u.message.reply_text("Заявка не найдена или уже обработана")
+    p = json.loads(r["plate"]); c.execute("UPDATE nft SET status='rejected' WHERE id=?", (nid,))
+    c.execute("UPDATE uniq SET owner=? WHERE key=? AND owner=-2", (r["uid"], r["key"])); gift(c, r["uid"], {"t": "plate", "v": p}); c.commit()
+    notify(r["uid"], "Заявка на NFT отклонена, номер вернулся в гараж.")
+    await u.message.reply_text("Отклонено, номер возвращён")
+
+async def mute(u, ctx):  # /mute - отключить рассылки игры
+    c = db(); c.execute("UPDATE users SET mute=1 WHERE id=?", (u.effective_user.id,)); c.commit(); await u.message.reply_text("🔕 Уведомления выключены. Включить: /unmute")
+
+async def unmute(u, ctx):
+    c = db(); c.execute("UPDATE users SET mute=0 WHERE id=?", (u.effective_user.id,)); c.commit(); await u.message.reply_text("🔔 Уведомления включены")
 
 app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
