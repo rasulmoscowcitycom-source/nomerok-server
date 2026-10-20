@@ -396,7 +396,7 @@ def top(b):
     uid, _ = auth(b.get("initData")); c = db(); now = time.time()
     if now - _TOP["ts"] > 15:
         hid = sorted(HIDDEN); q = ",".join("?" * len(hid))
-        rows = c.execute("SELECT id,name,bal FROM users WHERE bal>0 " + ("AND id NOT IN (%s) " % q if hid else "") + "ORDER BY bal DESC LIMIT 20", hid).fetchall()
+        rows = c.execute("SELECT id,name,bal FROM users WHERE bal>0 " + ("AND id NOT IN (%s) " % q if hid else "") + "ORDER BY bal DESC LIMIT 10", hid).fetchall()
         _TOP["list"] = [{"id": r["id"], "name": (r["name"] or "Игрок")[:18], "bal": r["bal"]} for r in rows]; _TOP["ts"] = now
     out = [{"n": i + 1, "name": x["name"], "bal": x["bal"], "me": x["id"] == uid} for i, x in enumerate(_TOP["list"])]
     me = None
