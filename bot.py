@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, apply_payment
+from server import db, gift, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, apply_payment, plate_txt, ukey, clean_plate
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -244,20 +244,67 @@ async def find(u, ctx):  # /find имя или ID - найти игрока и �
         out.append(f'{r["id"]} {r["name"]} · ур.{s.get("lv",1)} · {s.get("bal",0):,} сум · номеров {len(s.get("col",[]))} · машин {len(s.get("cars",[]))}')
     await u.message.reply_text("\n".join(out) or "Не найдено. Использование: /find имя или ID")
 
+def _keep_plan(c):
+    """Какие единственные номера оставить при сбросе: выпавшие в звёздной крутке + 001 UZB. Возвращает ({ключ: (владелец, номер, ts)}, [потерянные ключи])."""
+    import bisect
+    pts = sorted(r[0] for r in c.execute("SELECT ts FROM payments WHERE item='spin'"))
+    own = {}; keys = set()
+    for r in c.execute("SELECT key,owner,ts FROM uniq WHERE owner>0"):
+        own[r[0]] = (r[1], r[2]); parts = r[0].split("|")
+        i = bisect.bisect_right(pts, r[2]) - 1                                  # ближайшая оплата звёздной крутки не позже появления номера
+        star = i >= 0 and 0 <= r[2] - pts[i] <= 5
+        if star or (len(parts) == 5 and parts[3] == "001" and parts[4] == "UZB"): keys.add(r[0])
+    plan = {}
+    def take(uid, p):
+        if not isinstance(p, dict): return
+        try: pp = clean_plate(p)
+        except Exception: return
+        k = ukey(pp)
+        if k in keys and k not in plan and own.get(k, (None,))[0] == uid: plan[k] = (uid, pp, own[k][1])
+    for r in c.execute("SELECT id,state FROM users WHERE state IS NOT NULL"):
+        try: st = json.loads(r[1])
+        except Exception: continue
+        for p in (st.get("col") or []): take(r[0], p)
+        for car in (st.get("cars") or []):
+            if isinstance(car, dict): take(r[0], car.get("pl"))
+    for r in c.execute("SELECT uid,data FROM gifts"):
+        try: g = json.loads(r[1])
+        except Exception: continue
+        if g.get("t") == "plate": take(r[0], g.get("v"))
+    return plan, sorted(keys - set(plan))
+
 @admin
-async def resetall(u, ctx):  # /resetall CONFIRM - сбросить прогресс ВСЕХ игроков
-    if ctx.args != ["CONFIRM"]:
-        return await u.message.reply_text("⚠️ Это сотрёт прогресс ВСЕХ игроков (баланс, номера, машины, лоты, подарки, обмены, приглашения, использованные промокоды). "
-                                          "Игроки, их ID, промокоды и платежи останутся. Перед сбросом делается копия базы.\n\nПодтвердите: /resetall CONFIRM")
+async def resetall(u, ctx):  # /resetall CONFIRM - сбросить всех, оставив номера из звёздной крутки и 001 UZB; /resetall CONFIRM ALL - сбросить вообще всё
+    full = ctx.args == ["CONFIRM", "ALL"]
+    if ctx.args != ["CONFIRM"] and not full:
+        c = db(); plan, lost = _keep_plan(c)
+        lst = "\n".join("• %s — игрок %s" % (plate_txt(p), uid) for uid, p, _ in list(plan.values())[:40]) or "— таких номеров нет"
+        extra = ("\n…и ещё %d" % (len(plan) - 40)) if len(plan) > 40 else ""
+        return await u.message.reply_text("⚠️ Сброс сотрёт у ВСЕХ игроков баланс, обычные номера, машины, лоты, подарки, обмены, приглашения и использованные промокоды.\n"
+                                          "Останутся: ID игроков, промокоды, платежи, звёздный и TON-баланс и эти номера (вернутся владельцам в гараж):\n" + lst + extra +
+                                          ("\n\n⚠️ Не найдено в гаражах владельцев (не сохранятся): %d" % len(lost) if lost else "") +
+                                          "\n\nПеред сбросом делается копия базы.\nПодтвердить: /resetall CONFIRM\nСбросить вообще всё, без исключений: /resetall CONFIRM ALL")
     try: bk = backup_db("resetall")
     except Exception as e: return await u.message.reply_text(f"❌ Не удалось сделать копию базы ({e}). Сброс отменён.")
-    c = db(); rid = get_rid(c) + 1
+    c = db(); rid = get_rid(c) + 1; plan = {} if full else _keep_plan(c)[0]
     c.execute("CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id))")
-    for q in ("UPDATE users SET state=NULL", "DELETE FROM uniq", "DELETE FROM gifts", "DELETE FROM offers", "DELETE FROM auctions", "DELETE FROM referrals",
+    for q in ("UPDATE users SET state=NULL", "DELETE FROM uniq WHERE owner>=0", "DELETE FROM gifts", "DELETE FROM offers", "DELETE FROM auctions", "DELETE FROM referrals",
               "DELETE FROM refpending", "DELETE FROM redeemed", "UPDATE promos SET used=0", "DELETE FROM claims", "DELETE FROM events"):
         c.execute(q)
-    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rid',?)", (str(rid),)); c.commit()
-    await u.message.reply_text(f"✅ Прогресс всех игроков сброшен (сезон {rid}). Копия базы сохранена (/backup пришлёт свежую). У всех игра начнётся заново при следующем открытии.")
+    for k, (uid, p, ts) in plan.items():
+        c.execute("INSERT OR REPLACE INTO uniq(key,owner,ts) VALUES(?,?,?)", (k, uid, ts)); gift(c, uid, {"t": "plate", "v": p})
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rid',?)", (str(rid),)); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_end',?)", (str(int(time.time()) + 14 * 86400),)); c.commit()
+    await u.message.reply_text(f"✅ Прогресс всех игроков сброшен (сезон {rid}). Сохранено номеров: {len(plan)}. Копия базы сохранена (/backup пришлёт свежую). У всех игра начнётся заново при следующем открытии.")
+
+@admin
+async def season(u, ctx):  # /season Название ДНИ - новый сезон (Battle Pass всех сбрасывается), напр. /season Beta 3 14
+    if len(ctx.args) < 2 or not ctx.args[-1].isdigit():
+        c = db(); n = c.execute("SELECT v FROM meta WHERE k='season_name'").fetchone(); e = c.execute("SELECT v FROM meta WHERE k='season_end'").fetchone()
+        left = max(0, int(e[0]) - int(time.time())) if e else 0
+        return await u.message.reply_text(f"Сейчас сезон: {n[0] if n else 'Beta 2'}, осталось ~{left // 86400} дн.\nНовый сезон: /season Название ДНИ\nНапример: /season Beta 3 14\n(Battle Pass у всех начнётся заново. Прогресс игроков при этом НЕ сбрасывается — для этого есть /resetall CONFIRM.)")
+    days = max(1, min(120, int(ctx.args[-1]))); name = " ".join(ctx.args[:-1])[:24]
+    c = db(); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_name',?)", (name,)); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_end',?)", (str(int(time.time()) + days * 86400),)); c.commit()
+    await u.message.reply_text(f"✅ Сезон «{name}» начался на {days} дн.")
 
 @admin
 async def stat(u, ctx):  # /stat - здоровье сервера и базы
@@ -388,6 +435,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()

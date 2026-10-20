@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS refpending(uid INTEGER PRIMARY KEY,ref INT);
 CREATE TABLE IF NOT EXISTS referrals(uid INTEGER PRIMARY KEY,ref INT);
 CREATE TABLE IF NOT EXISTS events(name TEXT,luck REAL,sell REAL,xp REAL,until INT);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT);
+CREATE TABLE IF NOT EXISTS bp(uid INTEGER,sk TEXT,tier INTEGER,PRIMARY KEY(uid,sk));
+CREATE TABLE IF NOT EXISTS deal_used(uid INTEGER,day INTEGER,PRIMARY KEY(uid,day));
 CREATE TABLE IF NOT EXISTS uniq(key TEXT PRIMARY KEY,owner INT,ts INT);
 CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open');
 CREATE TABLE IF NOT EXISTS shop(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,price INT,ts INT,status TEXT DEFAULT 'open',buyer INT);
@@ -252,13 +254,19 @@ def gift(c, uid, d):
     except Exception: pass
 
 UPG_X = (2, 5, 10); UPG_RTP = 0.94; UPG_INS = 29
+UPG_MAXM = 1000                                   # номер можно улучшать снова и снова: множители перемножаются, потолок ×1000
+def m_ok(m):                                       # допустимый множитель номера: произведение 2, 5 и 10, не больше UPG_MAXM
+    if not isinstance(m, int) or m < 2 or m > UPG_MAXM: return False
+    for q in (2, 5):
+        while m % q == 0: m //= q
+    return m == 1
 def clean_plate(p):
     try: k = int(p["k"]); r = str(p["r"]); d = str(p["d"]); z = str(p["z"]).upper(); a = str(p.get("a") or "").upper()
     except Exception: raise HTTPException(400, "Неверный номер")
     o = {"k": k, "r": r, "d": d, "z": z, **({"a": a} if k == 0 else {})}
     try: m = int(p.get("m") or 0)
     except (TypeError, ValueError): m = 0
-    if m in UPG_X: o["m"] = m
+    if m_ok(m): o["m"] = m
     return o
 
 @api("/api/uclaim")
@@ -422,7 +430,7 @@ def load(b):
     c.execute("INSERT INTO users(id,name,first_seen,last_seen) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=?,last_seen=?", (uid, name, now, now, name, now))
     if not existed: ref_credit(c, uid)
     row = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
-    head = json.dumps({"uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid)}, separators=(",", ":"))
+    head = json.dumps({"uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}, separators=(",", ":"))
     c.commit()
     state = row["state"] if row and row["state"] else "null"   # состояние уже хранится как JSON - вставляем как есть
     if state != "null" and ('"z"' in state):
@@ -442,7 +450,7 @@ def poll(b):   # один лёгкий запрос вместо четырёх:
         _SEEN[uid] = t
         if len(_SEEN) > 100000: _SEEN.clear()
         c.execute("UPDATE users SET last_seen=? WHERE id=?", (int(t), uid)); c.commit()
-    return {"gifts": gifts_of(c, uid), "offers": offers_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "ev": event_of(c), "stars": stars_of(c, uid)}
+    return {"gifts": gifts_of(c, uid), "offers": offers_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "ev": event_of(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}
 
 def uniq_guard(c, uid, st):
     """Единственные номера (Мифик/Секретный): у каждого - ровно один владелец.
@@ -943,7 +951,6 @@ BLOCK = {"PAA", "PSS", "PPP", "APC", "TSS", "TST", "ZDF", "DXA", "FVV", "VSB", "
 STAR_ITEMS = {  # item: (звёзды, название, описание)
     "b50": (50, "Удача x2 на 2 часа", "Повышенный шанс на хорошие номера на 2 часа"),
     "b100": (100, "Набор бустов на 2 часа", "Удача x2, опыт x2 и бонус продажи +25% на 2 часа"),
-    "noads": (99, "Отключить рекламу", "Убрать рекламный баннер в игре навсегда"),
     "p500": (500, "Любой номер на выбор", "Номер, который вы выберете сами"),
 }
 
@@ -1185,7 +1192,7 @@ def upg(b):
     try: x = int(b.get("x", 0))
     except (TypeError, ValueError): x = 0
     if x not in UPG_X: raise HTTPException(400, "Неверный множитель")
-    if p.get("m"): raise HTTPException(400, "Этот номер уже улучшен")
+    if (p.get("m") or 1) * x > UPG_MAXM: raise HTTPException(400, "Максимальный множитель номера ×%d" % UPG_MAXM)
     need_own(c, uid, p)
     ins = bool(b.get("ins"))
     if ins: wspend(c, uid, UPG_INS, "upg-ins")
@@ -1194,7 +1201,53 @@ def upg(b):
     if not win and not ins and tier_py(p) >= 4:
         c.execute("UPDATE uniq SET owner=0 WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()
     c.commit()
-    return {"ok": 1, "win": win, "ch": ch, "ins": ins, "stars": stars_of(c, uid)}
+    return {"ok": 1, "win": win, "ch": ch, "ins": ins, "m": (p.get("m") or 1) * x if win else (p.get("m") or 1), "stars": stars_of(c, uid)}
+
+
+# ---------------------------------------------------------------- сезон, скидка дня и Battle Pass
+SEASON_DEF = os.environ.get("SEASON_NAME", "Beta 2")
+BP_PRICE = {1: 100, 2: 250}            # Премиум 100 ⭐, Премиум+ 250 ⭐ (если уже есть Премиум - доплата разницей)
+DEAL_PCT = 40
+DEAL_ITEMS = ("b50", "b100", "spin1", "spin5", "spin10")
+
+def season_of(c):
+    n = c.execute("SELECT v FROM meta WHERE k='season_name'").fetchone(); n = n[0] if n else SEASON_DEF
+    e = c.execute("SELECT v FROM meta WHERE k='season_end'").fetchone()
+    if not e:
+        end = int(time.time()) + 14 * 86400
+        c.execute("INSERT OR IGNORE INTO meta(k,v) VALUES('season_end',?)", (str(end),)); c.commit()
+    else: end = int(e[0])
+    return n, end
+
+def bp_tier(c, uid):
+    n, _ = season_of(c)
+    r = c.execute("SELECT tier FROM bp WHERE uid=? AND sk=?", (uid, n)).fetchone()
+    return int(r[0]) if r else 0
+
+def deal_day(): return (int(time.time()) + 5 * 3600) // 86400          # день по Ташкенту
+def deal_item(): return DEAL_ITEMS[deal_day() % len(DEAL_ITEMS)]
+def base_price(item):
+    if item.startswith("spin"): return int(item[4:]) * SPIN_PRICE
+    return STAR_ITEMS[item][0]
+def deal_price(item): return max(1, -(-base_price(item) * (100 - DEAL_PCT) // 100))
+
+def season_info(c, uid):
+    n, end = season_of(c); it = deal_item()
+    used = c.execute("SELECT 1 FROM deal_used WHERE uid=? AND day=?", (uid, deal_day())).fetchone() is not None
+    return {"n": n, "end": end, "bp": bp_tier(c, uid), "bpp": BP_PRICE, "deal": {"i": it, "pct": DEAL_PCT, "p": deal_price(it), "b": base_price(it), "used": used}}
+
+@api("/api/bp/buy")
+def bp_buy(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: tier = int(b.get("tier", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверный уровень")
+    if tier not in BP_PRICE: raise HTTPException(400, "Неверный уровень")
+    n, _e = season_of(c); cur = bp_tier(c, uid)
+    if cur >= tier: raise HTTPException(400, "У вас уже есть этот Battle Pass")
+    price = BP_PRICE[tier] - (BP_PRICE[cur] if cur else 0)
+    wspend(c, uid, price, "bp:%s:%d" % (n, tier))
+    c.execute("INSERT OR REPLACE INTO bp(uid,sk,tier) VALUES(?,?,?)", (uid, n, tier)); c.commit()
+    return {"ok": 1, "tier": tier, "stars": wallet_of(c, uid)}
 
 @api("/api/wbuy")
 def wbuy(b):
@@ -1209,17 +1262,24 @@ def wbuy(b):
         price = n * SPIN_PRICE; d["n"] = n
         if reg: d["g"] = reg
     elif item == "p500": d["p"] = check_plate(b.get("plate") or {}); price = STAR_ITEMS["p500"][0]
-    elif item in ("b50", "b100", "noads"): price = STAR_ITEMS[item][0]
+    elif item in ("b50", "b100"): price = STAR_ITEMS[item][0]
     elif item == "bal":
         try: st = int(b.get("s", 0))
         except (TypeError, ValueError): raise HTTPException(400, "Неверная сумма")
         if not (STAR_MIN <= st <= STAR_MAX): raise HTTPException(400, "Обмен от %d до %d ⭐" % (STAR_MIN, STAR_MAX))
         price = st; d["s"] = st
     else: raise HTTPException(400, "Товар не найден")
+    key = ("spin%d" % d["n"]) if item == "spin" else item; deal = False
+    if key == deal_item() and not d.get("g") and item != "bal" and item != "p500":
+        if c.execute("SELECT 1 FROM deal_used WHERE uid=? AND day=?", (uid, deal_day())).fetchone() is None:
+            price = deal_price(key); deal = True
     wspend(c, uid, price, "buy:" + item)
+    if deal: c.execute("INSERT OR IGNORE INTO deal_used(uid,day) VALUES(?,?)", (uid, deal_day()))
     msg = apply_payment(c, d, price, "wallet:" + os.urandom(8).hex())
     if msg is None:
-        wadd(c, uid, price, "refund:" + item); c.commit(); raise HTTPException(400, "Не удалось выдать покупку, звёзды вернулись на баланс")
+        wadd(c, uid, price, "refund:" + item)
+        if deal: c.execute("DELETE FROM deal_used WHERE uid=? AND day=?", (uid, deal_day()))
+        c.commit(); raise HTTPException(400, "Не удалось выдать покупку, звёзды вернулись на баланс")
     c.commit()
     return {"ok": 1, "stars": wallet_of(c, uid), "msg": msg, "item": item}
 
