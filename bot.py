@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, apply_payment, plate_txt, ukey, clean_plate
+from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, apply_payment, plate_txt, ukey, clean_plate
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -249,18 +249,23 @@ def _keep_plan(c):
     import bisect
     pts = sorted(r[0] for r in c.execute("SELECT ts FROM payments WHERE item='spin'"))
     own = {}; keys = set()
-    for r in c.execute("SELECT key,owner,ts FROM uniq WHERE owner>0"):
+    for r in c.execute("SELECT key,owner,ts FROM uniq WHERE owner!=0"):
         own[r[0]] = (r[1], r[2]); parts = r[0].split("|")
         i = bisect.bisect_right(pts, r[2]) - 1                                  # ближайшая оплата звёздной крутки не позже появления номера
         star = i >= 0 and 0 <= r[2] - pts[i] <= 5
         if star or (len(parts) == 5 and parts[3] == "001" and parts[4] == "UZB"): keys.add(r[0])
+    try:   # номера, выигранные за ⭐ на аукционе, тоже остаются
+        for r in c.execute("SELECT item FROM star_auc WHERE status='done' AND topuid IS NOT NULL").fetchall():
+            try: keys.add(ukey(clean_plate(json.loads(r[0]))))
+            except Exception: pass
+    except Exception: pass
     plan = {}
-    def take(uid, p):
+    def take(uid, p, esc=False):
         if not isinstance(p, dict): return
         try: pp = clean_plate(p)
         except Exception: return
-        k = ukey(pp)
-        if k in keys and k not in plan and own.get(k, (None,))[0] == uid: plan[k] = (uid, pp, own[k][1])
+        k = ukey(pp); ow = own.get(k, (None,))[0]
+        if k in keys and k not in plan and (ow == uid or (esc and ow in (-1, -3))): plan[k] = (uid, pp, own[k][1])
     for r in c.execute("SELECT id,state FROM users WHERE state IS NOT NULL"):
         try: st = json.loads(r[1])
         except Exception: continue
@@ -271,7 +276,26 @@ def _keep_plan(c):
         try: g = json.loads(r[1])
         except Exception: continue
         if g.get("t") == "plate": take(r[0], g.get("v"))
-    return plan, sorted(keys - set(plan))
+    listed = set(); lkeys = set()
+    for t, q in (("shop", "SELECT id,seller,item FROM shop WHERE status='open'"), ("star_auc", "SELECT id,seller,item FROM star_auc WHERE status='open'"),
+                 ("ton_lot", "SELECT id,seller,plate FROM ton_lot WHERE status='open'"), ("auctions", "SELECT id,seller,item FROM auctions WHERE status='open' AND seller>0"),
+                 ("duels", "SELECT id,a,aplate FROM duels WHERE status='open'")):   # номера, выставленные на витрину/аукцион/лоты
+        try: rows = c.execute(q).fetchall()
+        except Exception: continue
+        for lid, uid, it in rows:
+            try: it = json.loads(it)
+            except Exception: continue
+            if not isinstance(it, dict): continue
+            for cand in (it, it.get("pl"), it.get("v")):
+                if not isinstance(cand, dict): continue
+                try: k = ukey(clean_plate(cand))
+                except Exception: continue
+                if k in keys and own.get(k, (None,))[0] in (uid, -1, -3):
+                    if t == "duels": take(uid, cand, True)
+                    else: listed.add((t, lid)); lkeys.add(k)
+                    break
+    _keep_plan.listed = listed; _keep_plan.lkeys = lkeys
+    return plan, sorted(keys - set(plan) - lkeys)
 
 @admin
 async def resetall(u, ctx):  # /resetall CONFIRM - сбросить всех, оставив номера из звёздной крутки и 001 UZB; /resetall CONFIRM ALL - сбросить вообще всё
@@ -288,9 +312,20 @@ async def resetall(u, ctx):  # /resetall CONFIRM - сбросить всех, о
     except Exception as e: return await u.message.reply_text(f"❌ Не удалось сделать копию базы ({e}). Сброс отменён.")
     c = db(); rid = get_rid(c) + 1; plan = {} if full else _keep_plan(c)[0]
     c.execute("CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id))")
-    for q in ("UPDATE users SET state=NULL", "DELETE FROM uniq WHERE owner>=0", "DELETE FROM gifts", "DELETE FROM offers", "DELETE FROM auctions", "DELETE FROM referrals",
+    listed = set() if full else set(getattr(_keep_plan, "listed", ())); lkeys = set() if full else set(getattr(_keep_plan, "lkeys", ()))
+    try:   # ставки на ⭐ аукционе возвращаются на звёздный баланс (у снимаемых лотов); все остальные лоты снимаются
+        for a in c.execute("SELECT id,top,topuid FROM star_auc WHERE status='open' AND topuid IS NOT NULL").fetchall():
+            if ("star_auc", a[0]) not in listed: wadd(c, a[2], a[1], "reset-refund:%d" % a[0])
+    except Exception: pass
+    for t in ("shop", "star_auc", "ton_lot", "duels", "auctions"):
+        try:
+            for r in c.execute("SELECT id FROM " + t + " WHERE status='open'").fetchall():
+                if (t, r[0]) not in listed: c.execute("DELETE FROM " + t + " WHERE id=?", (r[0],))
+        except Exception: pass
+    for lid in [x[1] for x in listed if x[0] == "auctions"]: c.execute("UPDATE auctions SET top=0,topuid=NULL WHERE id=?", (lid,))
+    for q in ("UPDATE users SET state=NULL, bal=0", "DELETE FROM uniq WHERE (owner>=0 OR owner IN (-1,-3))" + (" AND key NOT IN (%s)" % ",".join("?" * len(lkeys)) if lkeys else ""), "DELETE FROM gifts", "DELETE FROM offers", "DELETE FROM referrals",
               "DELETE FROM refpending", "DELETE FROM redeemed", "UPDATE promos SET used=0", "DELETE FROM claims", "DELETE FROM events"):
-        c.execute(q)
+        c.execute(q, sorted(lkeys) if q.startswith("DELETE FROM uniq") else ())
     for k, (uid, p, ts) in plan.items():
         c.execute("INSERT OR REPLACE INTO uniq(key,owner,ts) VALUES(?,?,?)", (k, uid, ts)); gift(c, uid, {"t": "plate", "v": p})
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rid',?)", (str(rid),)); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_end',?)", (str(int(time.time()) + 14 * 86400),)); c.commit()
