@@ -242,7 +242,7 @@ $("sh").innerHTML='<div class="sc"><div class="hd">Выберите регион
 $("sh").onclick=function(e){var b=e.target.closest("button");if(b)pick(b.dataset.r);else if(e.target===this)this.hidden=true};
 $("rb").onclick=function(){$("sh").hidden=false};
 
-var SKIP=null;function reelRun(P,TT,fin){var s=$("stage"),RT=[],dn=0,fin0=fin;fin=function(){if(dn)return;dn=1;SKIP=null;RT.forEach(clearTimeout);fin0()};s.className="stage spin0";s.innerHTML=plate(P,1);var num=s.querySelector(".num"),R=[];
+var RSKIP=null;function reelRun(P,TT,fin){var s=$("stage"),RT=[],dn=0,fin0=fin;fin=function(){if(dn)return;dn=1;RSKIP=null;RT.forEach(clearTimeout);fin0()};s.className="stage spin0";s.innerHTML=plate(P,1);var num=s.querySelector(".num"),R=[];
  if(num){var tw=document.createTreeWalker(num,NodeFilter.SHOW_TEXT),nd=[],t;while(t=tw.nextNode())nd.push(t);
   nd.forEach(function(n){var txt=n.nodeValue,fr=document.createDocumentFragment();for(var i=0;i<txt.length;i++){var ch=txt[i];if(/\s/.test(ch)){fr.appendChild(document.createTextNode(ch));continue}var e=document.createElement("i");e.className="rl";e.dataset.c=ch;R.push({e:e,ch:ch,dg:/\d/.test(ch)});fr.appendChild(e)}n.parentNode.replaceChild(fr,n)})}
  R.sort(function(a,b){return a.dg===b.dg?0:a.dg?-1:1});
@@ -250,9 +250,9 @@ var SKIP=null;function reelRun(P,TT,fin){var s=$("stage"),RT=[],dn=0,fin0=fin;fi
  R.forEach(function(r,i){var N=10+i*5,D=.75+i*.42,h="<s>"+r.ch+"</s>",pool=r.dg?DG:LT;for(var k=0;k<N;k++)h+="<s>"+pool[rnd(pool.length)]+"</s>";r.e.innerHTML="<u>"+h+"</u>";var u=r.e.firstChild;u.style.setProperty("--n",N);u.style.setProperty("--d",D+"s");last=Math.max(last,D);
   RT.push(setTimeout(function(){r.e.classList.add("lt");beep(520+i*110,.07,"triangle",.12);beep(1040+i*60,.04,"sine",.05,.02);setR(Math.min(Math.floor((i+1)*(Math.min(TT,4)+1)/R.length),Math.min(TT,4)))},D*1000))});
  RT.push(setTimeout(fin,(R.length?last*1000+380:300)));
- SKIP=function(){if(dn)return;R.forEach(function(r){var u=r.e.firstChild;if(u)u.style.animation="none"});setR(Math.min(TT,4));beep(900,.06,"triangle",.1);fin()}}
+ RSKIP=function(){if(dn)return;R.forEach(function(r){var u=r.e.firstChild;if(u)u.style.animation="none"});setR(Math.min(TT,4));beep(900,.06,"triangle",.1);fin()}}
 $("go").onclick=function(){
- var fr=freeP(),c=fr?0:price();if(busy){if(SKIP)SKIP();return}if(st.bal<c){$("res").className="res c4";$("res").textContent="Не хватает сум — продайте номера";return}
+ var fr=freeP(),c=fr?0:price();if(busy){if(RSKIP)RSKIP();return}if(st.bal<c){$("res").className="res c4";$("res").textContent="Не хватает сум — продайте номера";return}
  busy=true;st.bal-=c;if(fr)st.fp--;$("go").textContent="⏩ Пропустить";$("res").textContent="";$("stage").classList.add("spin");setR(-1);var n=0,reg=$("rg").value,self=this,PP=luck(kind,reg),TT=tier(PP);
  var fin=function(){claimRoll(PP,0,function(p){var t=tier(p);pend=p;st.sp++;dq("sp",1);if(t>=2)dq("epic",1);if(p.r=="01")dq("r01",1);st.best=Math.max(st.best,t);if(t==5)st.sec=1;if(kind)st.firm++;
    show(p,"g"+t,1);try{var pl=$("stage").firstChild;pl.classList.add("lnd");pl.style.setProperty("--lc",["#94a3b8","#3b82f6","#a855f7","#f59e0b","#ef4444","#22d3ee"][t])}catch(e){}setR(t);chime(t);if(t==5||(p.k&&SS[p.z]))say(p.k&&SS[p.z]?"Спецсерия "+SS[p.z][0]:"Спецсерия");if(t>=2)burst(t);addXp(10+t*15);window.bpAdd&&bpAdd(10);save();draw();$("res").className="res c"+t;$("res").textContent=NM[t]+(t>1?"! ✨":"")+(t>=4?" 🔒":"")+" · "+REG[p.r]+(p.k&&SS[p.z]?" · "+SS[p.z][0]:(t==5?" · Спецсерия":""))+" · "+sh(val(p));busy=false;showAct()})};
@@ -1122,5 +1122,20 @@ window.duelArena=function(me,opp,win,stake,payout,chance,done){
  var seq=["3","2","1","БОЙ!"];seq.forEach(function(s,i){later(function(){var c=$("duc");if(!c)return;c.style.animation="none";void c.offsetWidth;c.style.animation="";c.textContent=s;beep(i<3?440:880,.15,"square",.1)},700+i*750)});
  later(function(){el.classList.add("clash","shake");try{beep(120,.35,"sawtooth",.2);beep(90,.5,"square",.15,.05);navigator.vibrate&&navigator.vibrate(120)}catch(e){}},3750);
  later(result,4500)};
+})();</script>
+<script id="fx">(function(){
+/* Отзывчивые кнопки: не перерисовываем панель, пока палец на экране (иначе нажатие «теряется»), и страхуем зависшие крутки */
+var down=0,pdq=0,_d4=window.draw4;
+function dn(){down=Date.now()}
+function up(){down=0;if(pdq){pdq=0;setTimeout(function(){try{window.draw4()}catch(e){}},80)}}
+document.addEventListener("pointerdown",dn,true);document.addEventListener("touchstart",dn,true);
+["pointerup","pointercancel","touchend","touchcancel"].forEach(function(e){document.addEventListener(e,up,true)});
+window.draw4=function(){if(down&&Date.now()-down<2000){pdq=1;return}return _d4.apply(this,arguments)};
+var bs=0,cs=0;
+setInterval(function(){try{
+ if(typeof busy!="undefined"&&busy){if(!bs)bs=Date.now();else if(Date.now()-bs>15000){busy=false;bs=0;var g=document.getElementById("go");if(g&&!pend_p()){g.hidden=false;g.disabled=false}draw()}}else bs=0;
+ if(typeof cbusy!="undefined"&&cbusy){if(!cs)cs=Date.now();else if(Date.now()-cs>15000){cbusy=false;cs=0;var c=document.getElementById("cgo");if(c)c.disabled=false;draw()}}else cs=0;
+}catch(e){}},2000);
+function pend_p(){try{return !!(window.pend||(typeof pend!="undefined"&&pend))}catch(e){return false}}
 })();</script>
 </body></html>
