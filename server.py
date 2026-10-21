@@ -898,15 +898,14 @@ def drop_alert(c, uid, p):
 
 @api("/api/send")
 def send_plate(b):
-    """Передать Мифик/Секретный номер другому игроку по ID (только такие номера: их принадлежность проверяет сервер)."""
+    """Передать номер другому игроку по ID (Мифик/Секретные: принадлежность проверяет сервер; остальные уходят подарком)."""
     uid, _ = auth(b.get("initData")); c = db(); p = clean_plate(b.get("p") or {})
     try: to = int(b.get("to", 0))
     except (TypeError, ValueError): raise HTTPException(400, "Неверный ID")
-    if tier_py(p) < 4: raise HTTPException(400, "Передавать можно Мифик и Секретные номера")
     if to == uid or not c.execute("SELECT 1 FROM users WHERE id=?", (to,)).fetchone(): raise HTTPException(400, "Игрок с таким ID не найден")
     day = int(time.time() // 86400)
     if c.execute("SELECT COUNT(*) FROM tlog WHERE uid=? AND why='send' AND ts>?", (uid, int(time.time()) - 86400)).fetchone()[0] >= 20: raise HTTPException(400, "Не больше 20 передач в сутки")
-    if c.execute("UPDATE uniq SET owner=? WHERE key=? AND owner=?", (to, ukey(p), uid)).rowcount != 1:
+    if tier_py(p) >= 4 and c.execute("UPDATE uniq SET owner=? WHERE key=? AND owner=?", (to, ukey(p), uid)).rowcount != 1:   # единственные номера: владение проверяет сервер
         c.rollback(); raise HTTPException(400, "Этот единственный номер вам не принадлежит")
     c.execute("INSERT INTO tlog(uid,d,why,ts) VALUES(?,0,'send',?)", (uid, int(time.time())))
     gift(c, to, {"t": "plate", "v": p}); c.commit()
