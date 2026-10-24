@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, apply_payment, plate_txt, ukey, clean_plate
+from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, apply_payment, plate_txt, ukey, clean_plate
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -124,6 +124,7 @@ async def players(u, ctx):
 
 def parse_gift(a):  # a = слова после ID игрока
     kind = a[0]
+    if kind == "noads": return {"t": "noads"}
     if kind == "bal": return {"t": "bal", "v": int(a[1])}
     if kind == "plate": return {"t": "plate", "v": {"k": 0, "r": a[1], "a": a[2].upper(), "d": a[3], "z": a[4].upper()}}
     if kind == "firm": return {"t": "plate", "v": {"k": 1, "r": a[1], "d": a[2], "z": a[3].upper()}}
@@ -136,7 +137,7 @@ def parse_gift(a):  # a = слова после ID игрока
     raise ValueError
 
 GIVE_HELP = ("Выдача: /give ID что-то (вместо ID можно all - всем игрокам)\n"
-             "/give ID bal 1000000\n/give ID plate 01 A 777 AC\n/give ID firm 01 007 AUB\n"
+             "/give ID noads (отключить рекламу навсегда)\n/give ID bal 1000000\n/give ID plate 01 A 777 AC\n/give ID firm 01 007 AUB\n"
              "/give ID car 3 Название машины (0-4: обычная...секретная)\n/give ID carplate 01 R 700 TT Zeekr 9X\n"
              "/give ID boost luck 120 (luck/sell/xp, минуты)\n\nНайти ID: /find имя, /players")
 
@@ -459,6 +460,20 @@ async def nftno(u, ctx):  # /nftno ID - отклонить заявку, ном�
     notify(r["uid"], "Заявка на NFT отклонена, номер вернулся в гараж.")
     await u.message.reply_text("Отклонено, номер возвращён")
 
+@admin
+async def ultra(u, ctx):  # /ultra 1 (Аюб) или /ultra 2 (Бибиша)
+    try: i = int(ctx.args[0])
+    except Exception: i = 0
+    await u.message.reply_text(launch_ultra(db(), i))
+
+@admin
+async def ads(u, ctx):  # /ads off - выключить рекламу всем, /ads on - включить
+    a = (ctx.args[0].lower() if ctx.args else "")
+    c = db()
+    if a in ("off", "on"):
+        c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('ads_off',?)", ("1" if a == "off" else "0",)); c.commit()
+    await u.message.reply_text("Реклама сейчас: %s\n/ads off - выключить всем\n/ads on - включить" % ("ВЫКЛЮЧЕНА" if ads_is_off(c) else "включена"))
+
 async def mute(u, ctx):  # /mute - отключить рассылки игры
     c = db(); c.execute("UPDATE users SET mute=1 WHERE id=?", (u.effective_user.id,)); c.commit(); await u.message.reply_text("🔕 Уведомления выключены. Включить: /unmute")
 
@@ -470,6 +485,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()

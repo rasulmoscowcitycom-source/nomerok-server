@@ -1265,7 +1265,11 @@ def deal_price(item): return max(1, -(-base_price(item) * (100 - DEAL_PCT) // 10
 def season_info(c, uid):
     n, end = season_of(c); it = deal_item()
     used = c.execute("SELECT 1 FROM deal_used WHERE uid=? AND day=?", (uid, deal_day())).fetchone() is not None
-    return {"n": n, "end": end, "bp": bp_tier(c, uid), "bpp": BP_PRICE, "deal": {"i": it, "pct": DEAL_PCT, "p": deal_price(it), "b": base_price(it), "used": used}}
+    return {"n": n, "end": end, "bp": bp_tier(c, uid), "bpp": BP_PRICE, "deal": {"i": it, "pct": DEAL_PCT, "p": deal_price(it), "b": base_price(it), "used": used},
+            "ads": 0 if ads_is_off(c) else 1}
+
+def ads_is_off(c):
+    r = c.execute("SELECT v FROM meta WHERE k='ads_off'").fetchone(); return bool(r and r[0] == "1")
 
 @api("/api/bp/buy")
 def bp_buy(b):
@@ -1540,22 +1544,32 @@ EXC = [("Rolls-Royce Spectre", 3.5), ("Lamborghini Aventador SVJ", 3.2), ("Ferra
 ULTRA = [("Mercedes G63 «Аюб»", {"k": 1, "r": "01", "d": "007", "z": "AUB"}), ("Zeekr 009 «Бибиша»", {"k": 0, "r": "01", "a": "A", "d": "777", "z": "AC"})]
 SYSLOT_EVERY = 1800   # новый эксклюзивный лот не чаще раза в 30 минут (торги идут 10 минут)
 
+def _push_syslot(c, item, now):
+    try: push_users(c, "last_seen>?", (now - 7 * 86400,), "🔨 Эксклюзивный аукцион! %s %s — торги идут 10 минут. Заходи, пока не ушёл!" % (item["v"]["e"], item["v"]["n"]))
+    except Exception: log.exception("push syslot")
+
 def system_lot(c):
     now = int(time.time())
     if c.execute("SELECT 1 FROM auctions WHERE seller=0 AND status='open'").fetchone(): return
     r = c.execute("SELECT v FROM meta WHERE k='syslot'").fetchone()
     if r and now - int(r[0]) < SYSLOT_EVERY: return
-    free = [u for u in ULTRA if not is_uniq(u[1]) or not c.execute("SELECT 1 FROM uniq WHERE key=?", (ukey(u[1]),)).fetchone()]
-    if free and random.random() < 0.25:   # супер-лот ~1 млрд: Аюб или Бибиша (если их номер ещё ни у кого нет)
-        n, pl = random.choice(free)
-        item = {"t": "car", "v": {"n": n, "e": "🚙", "t": 4, "m": 2, "pl": pl}}; start = 600_000_000
-    else:
-        n, m = random.choice(EXC)
-        item = {"t": "car", "v": {"n": n, "e": "🏎️", "t": 3, "m": m, "pl": None}}; start = int(30000000 * m * 0.5 / 1000) * 1000
+    n, m = random.choice(EXC)   # Аюб и Бибиша сами не появляются - только по команде /ultra
+    item = {"t": "car", "v": {"n": n, "e": "🏎️", "t": 3, "m": m, "pl": None}}; start = int(30000000 * m * 0.5 / 1000) * 1000
     c.execute("INSERT INTO auctions(seller,item,start,end) VALUES(0,?,?,?)", (json.dumps(item, ensure_ascii=False), start, now + 600))
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('syslot',?)", (str(now),)); c.commit(); _AUC[0] = 0
-    try: push_users(c, "last_seen>?", (now - 7 * 86400,), "🔨 Эксклюзивный аукцион! %s %s — торги идут 10 минут. Заходи, пока не ушёл!" % (item["v"]["e"], item["v"]["n"]), "🔨 К аукциону")
-    except Exception: log.exception("push syslot")
+    _push_syslot(c, item, now)
+
+def launch_ultra(c, idx):
+    """Команда админа: запустить супер-лот (1 - Аюб, 2 - Бибиша). Возвращает текст-ответ."""
+    if not (1 <= idx <= len(ULTRA)): return "Номер лота: 1 - %s, 2 - %s" % (ULTRA[0][0], ULTRA[1][0])
+    now = int(time.time()); n, pl = ULTRA[idx - 1]
+    if c.execute("SELECT 1 FROM auctions WHERE seller=0 AND status='open'").fetchone(): return "Уже идёт системный аукцион, дождитесь конца (10 минут)"
+    if is_uniq(pl) and c.execute("SELECT 1 FROM uniq WHERE key=?", (ukey(pl),)).fetchone(): return "Номер этой машины уже у игрока, лот запустить нельзя"
+    item = {"t": "car", "v": {"n": n, "e": "🚙", "t": 4, "m": 2, "pl": pl}}
+    c.execute("INSERT INTO auctions(seller,item,start,end) VALUES(0,?,?,?)", (json.dumps(item, ensure_ascii=False), 600_000_000, now + 600))
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('syslot',?)", (str(now),)); c.commit(); _AUC[0] = 0
+    _push_syslot(c, item, now)
+    return "✅ Аукцион запущен: %s, старт 600 000 000 сум, 10 минут. Всем игрокам ушло уведомление." % n
 
 # ---------------------------------------------------------------- уход за базой: чистка, копии, проверка, отчёт
 def cleanup(c):   # раз в час: убрать старые закрытые обмены и торги, не раздувать базу
