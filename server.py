@@ -978,7 +978,10 @@ STAR_ITEMS = {  # item: (звёзды, название, описание)
     "b50": (50, "Удача x2 на 2 часа", "Повышенный шанс на хорошие номера на 2 часа"),
     "b100": (100, "Набор бустов на 2 часа", "Удача x2, опыт x2 и бонус продажи +25% на 2 часа"),
     "p500": (500, "Любой номер на выбор", "Номер, который вы выберете сами"),
+    "noads": (99, "Убрать рекламу", "Реклама в игре отключается навсегда"),
 }
+
+def has_noads(c, uid): return c.execute("SELECT 1 FROM payments WHERE uid=? AND item='noads'", (uid,)).fetchone() is not None
 
 # ---------------------------------------------------------------- звёзды: пополнение баланса и «звёздная крутка» (единственные номера)
 STAR_RATE = int(os.environ.get("STAR_RATE", "1000000"))   # сколько сум даём за 1 ⭐ (можно поменять в настройках Render: STAR_RATE)
@@ -1109,7 +1112,9 @@ def invoice(b):
         amount, title, desc = n * SPIN_PRICE, "Звёздная крутка x%d" % n, "Выпадает единственный в игре номер: Мифик или Секретный"; payload = {"u": uid, "i": item, "n": n}
         if reg: payload["g"] = reg
     elif item not in STAR_ITEMS: raise HTTPException(400, "Товар не найден")
-    else: amount, title, desc = STAR_ITEMS[item]; payload = {"u": uid, "i": item}
+    else:
+        if item == "noads" and has_noads(db(), uid): raise HTTPException(400, "Реклама уже отключена")
+        amount, title, desc = STAR_ITEMS[item]; payload = {"u": uid, "i": item}
     if item == "p500": payload["p"] = check_plate(b.get("plate") or {})
     pl = json.dumps(payload, separators=(",", ":"))
     try: res = tg_request("createInvoiceLink", {"title": title, "description": desc, "payload": pl, "provider_token": "", "currency": "XTR",
@@ -1289,6 +1294,9 @@ def wbuy(b):
         if reg: d["g"] = reg
     elif item == "p500": d["p"] = check_plate(b.get("plate") or {}); price = STAR_ITEMS["p500"][0]
     elif item in ("b50", "b100"): price = STAR_ITEMS[item][0]
+    elif item == "noads":
+        if has_noads(c, uid): raise HTTPException(400, "Реклама уже отключена")
+        price = STAR_ITEMS["noads"][0]
     elif item == "bal":
         try: st = int(b.get("s", 0))
         except (TypeError, ValueError): raise HTTPException(400, "Неверная сумма")
@@ -1296,7 +1304,7 @@ def wbuy(b):
         price = st; d["s"] = st
     else: raise HTTPException(400, "Товар не найден")
     key = ("spin%d" % d["n"]) if item == "spin" else item; deal = False
-    if key == deal_item() and not d.get("g") and item != "bal" and item != "p500":
+    if key == deal_item() and not d.get("g") and item not in ("bal", "p500", "noads"):
         if c.execute("SELECT 1 FROM deal_used WHERE uid=? AND day=?", (uid, deal_day())).fetchone() is None:
             price = deal_price(key); deal = True
     wspend(c, uid, price, "buy:" + item)
