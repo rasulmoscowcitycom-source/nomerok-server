@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, apply_payment, plate_txt, ukey, clean_plate
+from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, apply_payment, plate_txt, ukey, clean_plate
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -474,6 +474,18 @@ async def ads(u, ctx):  # /ads off - выключить рекламу всем,
         c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('ads_off',?)", ("1" if a == "off" else "0",)); c.commit()
     await u.message.reply_text("Реклама сейчас: %s\n/ads off - выключить всем\n/ads on - включить" % ("ВЫКЛЮЧЕНА" if ads_is_off(c) else "включена"))
 
+@admin
+async def adsint(u, ctx):  # /adsint 60 или /adsint 60 10 (секунды между рекламой, сколько штук подряд)
+    c = db()
+    try:
+        i = int(ctx.args[0]); f = int(ctx.args[1]) if len(ctx.args) > 1 else ads_cfg(c)[1]
+        if not (20 <= i <= 3600 and 1 <= f <= 100): raise ValueError
+        c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('ads_cfg',?)", ("%d,%d" % (i, f),)); c.commit()
+    except IndexError: pass
+    except ValueError: return await u.message.reply_text("Секунды от 20 до 3600, штук подряд от 1 до 100. Пример: /adsint 60 10")
+    i, f = ads_cfg(c)
+    await u.message.reply_text("Реклама: раз в %d сек, до %d штук подряд, потом пауза ~6 минут.\nИзменить: /adsint секунды штук\nНапример /adsint 60 10\nДействует у игроков при следующем заходе в игру." % (i, f))
+
 async def mute(u, ctx):  # /mute - отключить рассылки игры
     c = db(); c.execute("UPDATE users SET mute=1 WHERE id=?", (u.effective_user.id,)); c.commit(); await u.message.reply_text("🔕 Уведомления выключены. Включить: /unmute")
 
@@ -485,6 +497,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()

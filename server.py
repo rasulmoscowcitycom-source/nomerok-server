@@ -1266,7 +1266,13 @@ def season_info(c, uid):
     n, end = season_of(c); it = deal_item()
     used = c.execute("SELECT 1 FROM deal_used WHERE uid=? AND day=?", (uid, deal_day())).fetchone() is not None
     return {"n": n, "end": end, "bp": bp_tier(c, uid), "bpp": BP_PRICE, "deal": {"i": it, "pct": DEAL_PCT, "p": deal_price(it), "b": base_price(it), "used": used},
-            "ads": 0 if ads_is_off(c) else 1}
+            "ads": 0 if ads_is_off(c) else 1, "ai": ads_cfg(c)}
+
+def ads_cfg(c):
+    r = c.execute("SELECT v FROM meta WHERE k='ads_cfg'").fetchone()
+    try: i, f = [int(x) for x in r[0].split(",")]
+    except Exception: i, f = 90, 4
+    return [max(20, min(3600, i)), max(1, min(100, f))]
 
 def ads_is_off(c):
     r = c.execute("SELECT v FROM meta WHERE k='ads_off'").fetchone(); return bool(r and r[0] == "1")
