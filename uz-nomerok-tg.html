@@ -325,7 +325,7 @@ function cval(c){return nr(CV[c.t]*c.m*.8*sm(),c.n)}
 function cw(c){return c[2]*((c[3]||1)>=1.5?.5:1)}
 function rollCar(i){if(i==4){var q=[["Pagani Huayra",.5,1],["Koenigsegg Jesko",.4,2],["Ferrari SF90 Stradale",.3,3],["Rolls-Royce Spectre",.3,3],["Bugatti Chiron",.4,2],["Mercedes G63 «Аюб»",.6,1],["Ferrari 812 Superfast",.22,4],["Ferrari Roma",.2,6],["Mercedes-AMG GT 63 S",.14,10],["Audi RS7",.12,9]],w=0,r,j;q.forEach(function(x){w+=x[2]});r=Math.random()*w;for(j=0;j<q.length-1;j++){r-=q[j][2];if(r<=0)break}return{n:q[j][0],e:"🏎️",t:4,m:q[j][1],pl:null}}var t=(i>0&&Math.random()<.35)?i-1:i,pool=CARS[t],w=0,r,j;pool.forEach(function(c){w+=cw(c)});r=Math.random()*w;for(j=0;j<pool.length;j++){r-=cw(pool[j]);if(r<=0)break}if(j>=pool.length)j=pool.length-1;var c=pool[j];return{n:c[0],e:c[1],t:t,m:c[3]||1,pl:null}}
 $("cm").onclick=function(e){var b=e.target.closest("button");if(!b||pc||cbusy)return;var i=+b.dataset.c;if(st.lv<CL[i]&&!(i==4&&st.sec)){toast("🔒 Откроется с "+CL[i]+" уровня");return}cm=i;drawCarRoll()};
-$("cgo").onclick=function(){if(cbusy||pc)return;var fcr=freeC();if(!fcr&&st.bal<CC[cm]){toast("Не хватает сум");return}cbusy=true;if(fcr)st.fc--;else st.bal-=CC[cm];this.disabled=true;$("cres").textContent="";var car=rollCar(cm),n=0,s=$("cst");
+$("cgo").onclick=function(){if(cbusy||pc)return;var fcr=freeC();if(!fcr&&st.bal<CC[cm]){toast("Не хватает сум");return}cbusy=true;st.cs=(st.cs||0)+1;if(fcr)st.fc--;else st.bal-=CC[cm];this.disabled=true;$("cres").textContent="";var car=rollCar(cm),n=0,s=$("cst");
  var iv=setInterval(function(){beep(300+n*40,.05,"square",.05);s.className="stage spin";s.innerHTML='<div class="c3w c3shuf">'+rcarSvg()+'</div>';
   if(++n>12){clearInterval(iv);pc=car;cbusy=false;var k=CT[car.t];s.className="stage g"+k+" pop";s.innerHTML='<div style="text-align:center">'+car3d(car.n,200)+'<br><b style="font-size:20px">'+car.n+'</b></div>';chime(k);if(car.t>=1)burst(k);$("cres").className="res c"+k;$("cres").textContent=CN[car.t]+" · "+sh(cval(car));$("cgo").hidden=true;$("cgo").disabled=false;$("cact").hidden=false;$("csv").textContent="💰 Продать · "+nfmt(cval(car));addXp(20+car.t*30);window.bpAdd&&bpAdd(10);save();draw()}},80)};
 function cdone(sell){if(!pc)return;if(sell){st.bal+=cval(pc);beep(1175,.12,"triangle",.15)}else st.cars.push(pc);$("cres").className="res c0";$("cres").textContent=sell?"Продано +"+fmt(cval(pc)):"Добавлено в гараж";pc=null;$("cact").hidden=true;$("cgo").hidden=false;save();draw()}
@@ -374,11 +374,11 @@ $("cdt").onclick=function(e){var b=e.target.closest("button"),c=st.cars[oc];if(!
  save();draw()};
 
 $("sub").onclick=function(){if(!st.luck){st.luck=1;save();toast("🍀 Удача ×2 включена");draw()}};
-function cleanOld(){if(!st.cl1){st.cars=st.cars.filter(function(c){return !(/Бибиша/.test(c.n)||(c.n=="Zeekr 9X"&&c.pl&&c.pl.d=="700"&&c.pl.z=="TT"))});st.cl1=1;save()}}cleanOld();var TGD=(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData)||"",UID=0,svT=0,LOADED=false,SG={},OF={incoming:[],outgoing:[]};
+function cleanOld(){if(!st.cl2){st.cars=(st.cars||[]).filter(function(c){return !/Бибиша/.test(c.n)});st.cl2=1;save()}if(!st.cl1){st.cars=st.cars.filter(function(c){return !(/Бибиша/.test(c.n)||(c.n=="Zeekr 9X"&&c.pl&&c.pl.d=="700"&&c.pl.z=="TT"))});st.cl1=1;save()}}cleanOld();var TGD=(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData)||"",UID=0,svT=0,LOADED=false,SG={},OF={incoming:[],outgoing:[]};
 var SVS="",POLL2=true,LASTP=0,LASTG=0,EVS="",OFS="",TGD2=0;
 function api(p,b){b=b||{};b.initData=TGD;return fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)}).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.detail||"Ошибка");return j})})}
 function uDup(L){var K=function(p){return [p.k,p.r,p.a||"",p.d,p.z].join("|")},S={};L.forEach(function(p){S[K(p)]=1});st.col=st.col.filter(function(p){return !S[K(p)]});(st.cars||[]).forEach(function(c){if(c.pl&&S[K(c.pl)])c.pl=null});SVS="";toast("⚠️ Этот номер уже принадлежит другому игроку — в вашем гараже его быть не может");draw()}
-function svSend(keep){if(!TGD||!LOADED)return Promise.resolve();clearTimeout(svT);var s=JSON.stringify(st);if(s===SVS)return Promise.resolve();SVS=s;return fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:'{"initData":'+JSON.stringify(TGD)+',"state":'+s+'}',keepalive:!!keep&&s.length<30000}).then(function(r){return r.json()}).then(function(r){if(r&&r.stale){location.reload();return}if(!r||!r.ok)SVS="";else if(r.own){location.reload()}else if(r.dup&&r.dup.length)uDup(r.dup)}).catch(function(){SVS=""})}
+function svSend(keep){if(!TGD||!LOADED)return Promise.resolve();clearTimeout(svT);var s=JSON.stringify(st);if(s===SVS)return Promise.resolve();SVS=s;return fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:'{"initData":'+JSON.stringify(TGD)+',"state":'+s+'}',keepalive:!!keep&&s.length<30000}).then(function(r){return r.json()}).then(function(r){if(r&&r.stale){location.reload();return}if(r&&r.rollback){st.bal=r.bal;SVS="";toast("⚠️ Баланс скорректирован сервером");draw();return}if(!r||!r.ok)SVS="";else if(r.own){location.reload()}else if(r.dup&&r.dup.length)uDup(r.dup)}).catch(function(){SVS=""})}
 function sv(){if(!TGD||!LOADED)return;clearTimeout(svT);svT=setTimeout(function(){svSend()},800)}
 function svNow(){svSend(true)}
 function gAck(ids){svSend().then(function(){if(SVS)return api("/api/gifts/clear",{ids:ids})}).catch(function(){})}
@@ -952,8 +952,8 @@ function left(ts){if(!ts)return"—";var s=Math.max(0,Math.floor(ts-Date.now()/1
 function dayLeft(){var s=86400-((Math.floor(Date.now()/1000)+18000)%86400);return Math.floor(s/3600)+" ч "+Math.floor(s%3600/60)+" м"}
 /* ---------- кнопка «назад» Telegram ---------- */
 var TW=window.Telegram&&Telegram.WebApp,BBon=false;
-function backSync(){try{if(!TW||!TW.BackButton)return;var b=$("bpv"),m=$("mnv"),t=$("tpv"),open=(b&&!b.hidden)||(m&&!m.hidden)||(t&&!t.hidden);if(open&&!BBon){TW.BackButton.show();BBon=true}else if(!open&&BBon){TW.BackButton.hide();BBon=false}}catch(e){}}
-try{if(TW&&TW.BackButton)TW.BackButton.onClick(function(){var t=$("tpv");if(t&&!t.hidden){t.hidden=true;backSync();return}var b=$("bpv");if(b&&!b.hidden){b.hidden=true;backSync();return}var m=$("mnv");if(m&&!m.hidden)closeMenu()})}catch(e){}
+function backSync(){try{if(!TW||!TW.BackButton)return;var b=$("bpv"),m=$("mnv"),t=$("tpv"),f=$("fpv"),open=(b&&!b.hidden)||(m&&!m.hidden)||(t&&!t.hidden)||(f&&!f.hidden);if(open&&!BBon){TW.BackButton.show();BBon=true}else if(!open&&BBon){TW.BackButton.hide();BBon=false}}catch(e){}}
+try{if(TW&&TW.BackButton)TW.BackButton.onClick(function(){var f=$("fpv");if(f&&!f.hidden){f.hidden=true;backSync();return}var t=$("tpv");if(t&&!t.hidden){t.hidden=true;backSync();return}var b=$("bpv");if(b&&!b.hidden){b.hidden=true;backSync();return}var m=$("mnv");if(m&&!m.hidden)closeMenu()})}catch(e){}
 /* ---------- Battle Pass: данные ---------- */
 window.bpSync=function(){if(!ready())return;var s=S();if(st.bps!==s.n){st.bps=s.n;st.bpx=0;st.bc={f:[],p:[],x:[]}}if(!st.bc)st.bc={f:[],p:[],x:[]};if(!st.ct)st.ct=[0,0,0]};
 window.bpAdd=function(n){bpSync();st.bpx=(st.bpx||0)+n};
@@ -1029,6 +1029,31 @@ function tpRender(j){var e=$("tpv");if(!e||e.hidden)return;var L=(j&&j.list)||[]
  h+='</div>';e.innerHTML=h}
 function openTop(){var e=tpEl();e.hidden=false;tpRender(null);backSync();api("/api/top",{}).then(tpRender).catch(function(){var n=e.querySelector(".tpe");if(n)n.textContent="Не удалось загрузить. Попробуйте позже."})}
 window.openTop=openTop;
+/* ---------- Поиск номеров: кто владелец и сколько владельцев было ---------- */
+var FQ="";
+function fpEl(){var e=$("fpv");if(!e){e=document.createElement("div");e.id="fpv";e.className="mnv";e.style.zIndex=33;e.hidden=true;document.body.appendChild(e);
+ e.innerHTML='<div class="mnh"><button class="x" data-x="fpback">‹</button><span>🔎 Поиск номеров</span><span style="width:36px"></span></div><div class="mnb"><div class="box" style="font-size:13px;color:var(--mut)">Введите номер, и вы увидите, у кого он сейчас и сколько владельцев у него было. Работает для <b>Мифик</b> и <b>Секретных</b> номеров: они единственные в игре.<br>Примеры: <b>01 A 777 AC</b> · <b>01 007 AUB</b></div><input class="inp" id="fpq" type="text" autocomplete="off" autocapitalize="characters" placeholder="Например: 01 A 777 AC" style="margin-top:10px"><button class="chip" id="fpb" style="margin-top:10px;width:100%;padding:14px;font-size:16px;font-weight:800">Найти</button><div id="fpr" style="margin-top:12px"></div></div>';
+ e.addEventListener("click",function(ev){if(ev.target.closest("[data-x=fpback]")){e.hidden=true;backSync();return}if(ev.target.closest("#fpb"))fpGo()});
+ e.querySelector("#fpq").addEventListener("keydown",function(ev){if(ev.key=="Enter"){ev.preventDefault();fpGo()}});
+ e.querySelector("#fpq").addEventListener("input",function(){var i=this,s=i.selectionStart;i.value=i.value.toUpperCase()})}return e}
+function fpParse(t){var map={"А":"A","В":"B","С":"C","Е":"E","К":"K","М":"M","Н":"H","О":"O","Р":"P","Т":"T","Х":"X","У":"Y"};
+ var s=String(t||"").toUpperCase().replace(/[АВСЕКМНОРТХУ]/g,function(c){return map[c]}).replace(/[^0-9A-Z]/g,"");
+ var m=/^(\d{2})([A-Z]?)(\d{3})([A-Z]{2,3})$/.exec(s);if(!m)return null;
+ if(m[2]){if(m[4].length!=2)return null;return{k:0,r:m[1],a:m[2],d:m[3],z:m[4]}}
+ if(m[4].length!=3)return null;return{k:1,r:m[1],d:m[3],z:m[4]}}
+function fpGo(){var r=$("fpr"),p=fpParse($("fpq").value);if(!r)return;
+ if(!p){r.innerHTML='<div class="box" style="color:#ef4444;text-align:center">Не получилось разобрать номер. Пример: 01 A 777 AC или 01 007 AUB</div>';return}
+ if(!(typeof TGD!="undefined"&&TGD)){r.innerHTML='<div class="box" style="text-align:center;color:var(--mut)">Поиск работает в Telegram</div>';return}
+ r.innerHTML='<div class="box" style="text-align:center;color:var(--mut)">Ищу…</div>';
+ api("/api/plate/find",{plate:p}).then(function(j){var pl=j.plate,t=j.tier,h='<div class="box" style="text-align:center">'+plate(pl,1)+(j.found?'<div style="margin-top:8px;font-weight:800" class="c'+t+'">'+NM[t]+'</div>':'')+'</div>';
+  if(!j.found)h+='<div class="box" style="text-align:center;color:var(--mut)">Это не Мифик и не Секретный номер. Владельцев показываем только для них.</div>';
+  else if(j.free)h+='<div class="box" style="text-align:center"><b>Свободен</b><div style="color:var(--mut);font-size:13px;margin-top:4px">Этот номер ещё никто не выбил. Владельцев: 0</div></div>';
+  else{h+='<div class="box"><div style="display:flex;justify-content:space-between;gap:10px"><span style="color:var(--mut)">Владелец сейчас</span><b>'+(j.owner?esc(j.owner.name)+(j.owner.me?' (вы)':''):esc(j.state||"В игре"))+'</b></div>'
+   +(j.owner?'<div style="display:flex;justify-content:space-between;gap:10px;margin-top:8px"><span style="color:var(--mut)">ID владельца</span><b>'+j.owner.id+'</b></div>':'')
+   +'<div style="display:flex;justify-content:space-between;gap:10px;margin-top:8px"><span style="color:var(--mut)">Было владельцев</span><b>'+j.owners+'</b></div></div>'}
+  r.innerHTML=h}).catch(function(e){r.innerHTML='<div class="box" style="color:#ef4444;text-align:center">'+esc(e.message||"Ошибка")+'</div>'})}
+function openFind(){var e=fpEl();e.hidden=false;backSync();setTimeout(function(){try{$("fpq").focus()}catch(x){}},300)}
+window.openFind=openFind;
 /* ---------- меню ---------- */
 function mEl(){var e=$("mnv");if(!e){e=document.createElement("div");e.id="mnv";e.className="mnv";e.hidden=true;document.body.appendChild(e);e.addEventListener("click",mClick)}return e}
 var DN={b50:"Удача ×2 · 2 часа",b100:"Набор бустов · 2 часа",spin1:"Звёздная крутка ×1",spin5:"Звёздная крутка ×5",spin10:"Звёздная крутка ×10"};
@@ -1046,6 +1071,7 @@ function menuRender(){var e=$("mnv");if(!e||e.hidden)return;bpSync();var s=S(),d
   +tile("duel","⚔️","Дуэли","на ставку")
   +tile("tasks","🎯","Задания","промокод")
   +tile("r","🏆","Топ","10 лучших")
+  +tile("find","🔎","Поиск номеров","владелец")
   +tile("tn","💎","TON","кошелёк")
   +tile("t","🔁","Обмен","с игроками")
   +tile("ev","🎉","Ивент",evOn?"идёт сейчас":"по выходным",evOn)
@@ -1055,13 +1081,13 @@ function menuRender(){var e=$("mnv");if(!e||e.hidden)return;bpSync();var s=S(),d
   +'</div></div><div class="mnf"><button data-x="close">‹ Назад в игру</button></div>';
  e.innerHTML=h;var nb=e.querySelector(".mnb");if(nb)nb.scrollTop=top}
 function openMenu(){var e=mEl();e.hidden=false;e.style.animation="none";void e.offsetWidth;e.style.animation="";menuRender();backSync()}
-function closeMenu(){var e=$("mnv");if(e)e.hidden=true;var b=$("bpv");if(b)b.hidden=true;var t=$("tpv");if(t)t.hidden=true;backSync()}
+function closeMenu(){var e=$("mnv");if(e)e.hidden=true;var b=$("bpv");if(b)b.hidden=true;var t=$("tpv");if(t)t.hidden=true;var f=$("fpv");if(f)f.hidden=true;backSync()}
 window.openMenu=openMenu;window.closeMenu=closeMenu;window.bpRender=bpRender;window.menuRender=menuRender;window.openDw=openDw;window.genCt=genCt;
 var MENU_ONLY={tn:1,t:1};
 function goS(n,s){closeMenu();if(s){try{sub4=s}catch(e){}}window.MENUGO=1;tab(n);window.MENUGO=0}
 function mClick(e){var b=e.target.closest("[data-a],[data-x]");if(!b)return;var a=b.dataset.a,x=b.dataset.x;
  if(x=="close"){closeMenu();return}
- if(a=="shop")goS(4,"s");else if(a=="top"||a=="r")openTop();else if(a=="tn")goS(4,"tn");else if(a=="t")goS(4,"t");else if(a=="duel")goS(4,"d");
+ if(a=="shop")goS(4,"s");else if(a=="top"||a=="r")openTop();else if(a=="find")openFind();else if(a=="tn")goS(4,"tn");else if(a=="t")goS(4,"t");else if(a=="duel")goS(4,"d");
  else if(a=="bp")openBp();
  else if(a=="ev"){var on=typeof EV!="undefined"&&EV.until>Date.now();toast(on?(EV.name||"Ивент")+" идёт: бонусы к удаче и апгрейду":"Ивент включается по выходным — следите за уведомлениями")}
  else if(a=="goal")toast("Крутите вместе: награда, когда все игроки выполнят цель");

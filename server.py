@@ -54,6 +54,10 @@ CREATE INDEX IF NOT EXISTS ix_gifts_uid ON gifts(uid);
 CREATE INDEX IF NOT EXISTS ix_offers_to ON offers(to_id,status);
 CREATE INDEX IF NOT EXISTS ix_offers_frm ON offers(frm,status);
 CREATE INDEX IF NOT EXISTS ix_ref_ref ON referrals(ref);
+CREATE TABLE IF NOT EXISTS uniq_own(key TEXT,uid INT,ts INT,PRIMARY KEY(key,uid));
+CREATE TRIGGER IF NOT EXISTS tr_uniq_ins AFTER INSERT ON uniq WHEN NEW.owner>0 BEGIN INSERT OR IGNORE INTO uniq_own(key,uid,ts) VALUES(NEW.key,NEW.owner,strftime('%s','now')); END;
+CREATE TRIGGER IF NOT EXISTS tr_uniq_upd AFTER UPDATE OF owner ON uniq WHEN NEW.owner>0 BEGIN INSERT OR IGNORE INTO uniq_own(key,uid,ts) VALUES(NEW.key,NEW.owner,strftime('%s','now')); END;
+INSERT OR IGNORE INTO uniq_own(key,uid,ts) SELECT key,owner,ts FROM uniq WHERE owner>0;
 CREATE INDEX IF NOT EXISTS ix_auc_open ON auctions(status,end);
 CREATE INDEX IF NOT EXISTS ix_auc_seller ON auctions(seller,status);
 CREATE INDEX IF NOT EXISTS ix_shop_open ON shop(status,id);
@@ -247,7 +251,9 @@ def need_own(c, uid, v):
 def uniq_set(c, uid, p):   # передать номер новому владельцу
     c.execute("INSERT OR REPLACE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time())))
 
+_GIFTED = {}   # когда игрок последний раз получал что-то от сервера (подарок, приз, выигрыш) - тогда рост баланса честный
 def gift(c, uid, d):
+    _GIFTED[uid] = time.time()
     c.execute("INSERT INTO gifts(uid,data) VALUES(?,?)", (uid, json.dumps(d)))
     try:   # номер/машина с номером: единственный экземпляр переходит получателю
         if d.get("t") == "plate" and is_uniq(d.get("v")): uniq_set(c, uid, d["v"])
@@ -270,11 +276,34 @@ def clean_plate(p):
     if m_ok(m): o["m"] = m
     return o
 
+# ---- защита от накрутки: суточные лимиты на действия, которые создают ценности "из воздуха"
+UCL_DAY = int(os.environ.get("UCL_DAY", 5))        # новых Мифик/Секретных номеров в сутки на игрока
+DUEL_DAY = int(os.environ.get("DUEL_DAY", 10))     # дуэлей (создать/принять) в сутки на игрока
+OFFER_DAY = int(os.environ.get("OFFER_DAY", 50 * 10 ** 9))   # сумма продаж обменом в сутки на продавца
+OFFER_ALERT = int(os.environ.get("OFFER_ALERT", 5 * 10 ** 9))
+_LIM = {}
+def lim_hit(kind, uid, n=1, cap=1):   # True - лимит исчерпан (счётчик не растёт); окно 24 часа
+    k = (kind, uid); t = time.time(); w = _LIM.get(k)
+    if not w or t - w[0] > 86400: w = [t, 0]
+    if w[1] + n > cap: _LIM[k] = w; return True
+    w[1] += n; _LIM[k] = w
+    if len(_LIM) > 200000: _LIM.clear()
+    return False
+def alert_admins(txt):
+    for a in HIDDEN: notify(a, txt, "🎰 Открыть игру")
+
 @api("/api/uclaim")
 def uclaim(b):   # игрок выбил номер: если это Мифик/Секретный - закрепить его за собой, если свободен
     uid, _ = auth(b.get("initData")); p = clean_plate(b.get("p") or {}); c = db()
     if tier_py(p) < 4: return {"ok": 1, "free": 1}
-    c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time()))); c.commit()   # кто успел первым - тот и владелец
+    c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time())))   # кто успел первым - тот и владелец
+    new = c.execute("SELECT changes()").fetchone()[0] == 1
+    if new and uid not in HIDDEN and lim_hit("ucl", uid, 1, UCL_DAY):   # слишком много новых редких номеров за сутки - так не бывает, это накрутка
+        c.execute("DELETE FROM uniq WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()
+        log.warning("ПОДОЗРЕНИЕ: %s превысил суточный лимит редких номеров", uid)
+        if not lim_hit("ucl_al", uid, 1, 1): alert_admins("⚠️ Игрок ID %s пытается получить больше %d Мифик/Секретных номеров за сутки (возможный чит). Лишние номера отклонены." % (uid, UCL_DAY))
+        return {"ok": 0, "taken": 1}
+    c.commit()
     row = c.execute("SELECT owner FROM uniq WHERE key=?", (ukey(p),)).fetchone()
     if row and row["owner"] != uid: return {"ok": 0, "taken": 1}
     try: drop_alert(c, uid, p)
@@ -380,6 +409,7 @@ def _hidden_ids():   # админы (ADMINS) и HIDE_IDS не показываю
         if x.strip().lstrip("-").isdigit(): out.add(int(x))
     return out
 HIDDEN = _hidden_ids()
+BAL_ROLL = int(os.environ.get("BAL_ROLL", 10 ** 10))   # рост баланса без причины (нет круток, продаж, заданий, подарков) больше этого - откатывается
 BAL_JUMP = int(os.environ.get("BAL_JUMP", 3 * 10 ** 9))   # скачок баланса за одно сохранение, после которого админы получают оповещение
 _JUMP = {}
 
@@ -390,6 +420,18 @@ def bal_backfill():   # один раз: заполнить рейтинг по 
         try: c.execute("UPDATE users SET bal=? WHERE id=?", (_bal_of(json.loads(r["state"])), r["id"]))
         except Exception: pass
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('bal_bf','1')"); c.commit()
+
+def bibisha_purge():   # один раз: убрать всех Бибиш у всех игроков (теперь выдаются только командой)
+    c = db()
+    if c.execute("SELECT 1 FROM meta WHERE k='bibisha_purge'").fetchone(): return
+    n = 0
+    for r in c.execute("SELECT id,state FROM users WHERE state IS NOT NULL").fetchall():
+        try:
+            st = json.loads(r["state"]); L = st.get("cars") or []
+            nl = [x for x in L if not (isinstance(x, dict) and "Бибиша" in str(x.get("n", "")))]
+            if len(nl) != len(L): st["cars"] = nl; c.execute("UPDATE users SET state=? WHERE id=?", (json.dumps(st, separators=(",", ":")), r["id"])); n += 1
+        except Exception: pass
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('bibisha_purge','1')"); c.commit(); log.warning("bibisha purge: %d игроков", n)
 
 def jump_why(old_json, st, last_seen):   # что изменилось в состоянии игрока между двумя сохранениями: помогает понять, откуда скачок баланса
     try: o = json.loads(old_json) if old_json else {}
@@ -415,6 +457,27 @@ def jump_why(old_json, st, last_seen):   # что изменилось в сос
     elif sold > 0: lines.append("Продаж номеров за это время: %d — возможно, честная продажа дорогого номера." % sold)
     else: lines.append("Круток за это время: %d" % max(sp, 0))
     return "\n".join(lines)
+
+UQ_STATE = {0: "Выведен из игры", -1: "Выставлен на аукцион за ⭐", -2: "Выводится как NFT", -3: "Выставлен за TON"}
+
+@api("/api/plate/find")
+def plate_find(b):
+    """Поиск единственного номера (Мифик / Секретный): кто владелец сейчас и сколько владельцев было."""
+    uid, _ = auth(b.get("initData")); c = db()
+    p = clean_plate(b.get("plate") or {})
+    if not (p["d"].isdigit() and len(p["d"]) == 3 and 2 <= len(p["z"]) <= 3 and len(p["r"]) == 2 and p["r"].isdigit()): raise HTTPException(400, "Неверный номер")
+    t = tier_py(p)
+    out = {"plate": {k: v for k, v in p.items() if k != "m"}, "tier": t}
+    if t < 4: return {**out, "found": 0}
+    k = ukey(p); row = c.execute("SELECT owner FROM uniq WHERE key=?", (k,)).fetchone()
+    if not row: return {**out, "found": 1, "free": 1, "owners": 0}
+    n = c.execute("SELECT COUNT(*) FROM uniq_own WHERE key=?", (k,)).fetchone()[0]
+    o = row["owner"]; res = {**out, "found": 1, "owners": n}
+    if o > 0:
+        u = c.execute("SELECT name FROM users WHERE id=?", (o,)).fetchone()
+        res["owner"] = {"id": o, "name": ((u["name"] if u else "") or "Игрок")[:24], "me": o == uid}
+    else: res["state"] = UQ_STATE.get(o, "В игре")
+    return res
 
 _TOP = {"ts": 0, "list": []}
 @api("/api/top")
@@ -489,6 +552,10 @@ def uniq_guard(c, uid, st):
         if tier_py(pp) < 4: return True
         k = ukey(pp)
         c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (k, uid, int(time.time())))
+        if c.execute("SELECT changes()").fetchone()[0] == 1 and uid not in HIDDEN and lim_hit("ugd", uid, 1, UCL_DAY * 4):
+            c.execute("DELETE FROM uniq WHERE key=? AND owner=?", (k, uid)); dups.append(pp)
+            if not lim_hit("ucl_al", uid, 1, 1): alert_admins("⚠️ Игрок ID %s: в сохранении больше %d новых Мифик/Секретных номеров за сутки (возможный чит). Лишние удалены." % (uid, UCL_DAY * 4))
+            return False
         row = c.execute("SELECT owner FROM uniq WHERE key=?", (k,)).fetchone()
         if row and row["owner"] != uid:
             dups.append(pp); return False
@@ -513,7 +580,21 @@ def save(b):
     uid, _ = auth(b.get("initData")); c = db(); st = b.get("state")
     if not isinstance(st, dict): raise HTTPException(400, "Неверное состояние")
     if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
-    dups = uniq_guard(c, uid, st); own = st.pop("_own", 0)
+    if not st.get("cl2") and isinstance(st.get("cars"), list):   # старый клиент: Бибиша теперь только по команде, лишние убираем
+        st["cars"] = [x for x in st["cars"] if not (isinstance(x, dict) and "Бибиша" in str(x.get("n", "")))]
+    dups = uniq_guard(c, uid, st); own = st.pop("_own", 0); rb = None
+    try:
+        o0 = c.execute("SELECT bal,state FROM users WHERE id=?", (uid,)).fetchone()
+        if o0 and uid not in HIDDEN and o0["state"]:
+            ob, nb0 = (o0["bal"] or 0), _bal_of(st)
+            if nb0 - ob > BAL_ROLL and time.time() - _GIFTED.get(uid, 0) > 900:
+                os_ = json.loads(o0["state"])
+                same = all((st.get(k) or 0) == (os_.get(k) or 0) for k in ("sp", "sold", "bpx", "xp", "lv", "fp", "fc", "cs"))
+                same = same and all(isinstance(st.get(k), list) == isinstance(os_.get(k), list) and len(st.get(k) or []) <= len(os_.get(k) or []) for k in ("col", "cars"))
+                if same:   # деньги выросли, а ничего не крутили, не продавали и не выполняли - это правка баланса
+                    log.warning("ОТКАТ баланса %s: %s -> %s", uid, ob, nb0); st["bal"] = ob; rb = ob
+                    if not lim_hit("rb_al", uid, 1, 1): alert_admins("🛑 Накрутка баланса отклонена\nИгрок ID %s пытался изменить баланс %s → %s сум без круток и продаж. Баланс возвращён." % (uid, fnum(ob), fnum(nb0)))
+    except Exception: log.exception("rollback check")
     try:    # подозрительный скачок баланса за одно сохранение - сообщаем админам с причиной (читеры правят состояние игры)
         old = c.execute("SELECT bal,state,last_seen FROM users WHERE id=?", (uid,)).fetchone(); nb = _bal_of(st)
         if old and nb - (old["bal"] or 0) > BAL_JUMP and uid not in HIDDEN and time.time() - _JUMP.get(uid, 0) > 3600:
@@ -523,6 +604,7 @@ def save(b):
     except Exception: log.exception("jump check")
     c.execute("UPDATE users SET state=?,last_seen=?,bal=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), _bal_of(st), uid)); c.commit()
     r = {"ok": 1}
+    if rb is not None: r["rollback"] = 1; r["bal"] = rb
     if dups: r["dup"] = dups
     if own: r["own"] = own
     return r
@@ -550,6 +632,7 @@ def promo(b):
     if c.execute("UPDATE promos SET used=used+1 WHERE code=? AND used<max_uses", (code,)).rowcount != 1:   # последний код забрали в ту же секунду
         c.rollback(); raise HTTPException(400, "Промокод закончился")
     c.commit()
+    _GIFTED[uid] = time.time()
     return {"reward": json.loads(p["reward"])}
 
 @api("/api/offer/create")
@@ -563,6 +646,7 @@ def offer_create(b):
     if not isinstance(item, dict) or item.get("t") not in ("plate", "car") or not isinstance(item.get("v"), dict):
         raise HTTPException(400, "Неверные данные предложения")
     need_own(c, uid, item["v"])
+    if price > OFFER_DAY: raise HTTPException(400, "Слишком высокая цена")
     c.execute("INSERT INTO offers(frm,to_id,item,price,ts) VALUES(?,?,?,?,?)", (uid, to, json.dumps(item), price, int(time.time()))); c.commit()
     notify(to, "🤝 %s предлагает вам обмен:\n%s\nЦена: %s" % (str(uname)[:30] or ("ID %d" % uid), item_txt(item), (fnum(price) + " сум") if price else "бесплатно (подарок)"), "🤝 Открыть предложение")
     return {"ok": 1}
@@ -578,6 +662,9 @@ def offer_accept(b):
     if not o or o["to_id"] != uid: raise HTTPException(400, "Предложение недоступно")
     if c.execute("UPDATE offers SET status='done' WHERE id=? AND status='open'", (o["id"],)).rowcount != 1:
         raise HTTPException(400, "Предложение недоступно")
+    if o["price"] > 0 and o["frm"] not in HIDDEN and lim_hit("offer", o["frm"], o["price"], OFFER_DAY):
+        c.execute("UPDATE offers SET status='open' WHERE id=?", (o["id"],)); c.commit(); raise HTTPException(400, "Дневной лимит продаж продавца исчерпан")
+    if o["price"] >= OFFER_ALERT: alert_admins("⚠️ Крупная сделка обменом: ID %s → ID %s, цена %s сум. Проверьте, нет ли сговора." % (o["frm"], uid, fnum(o["price"])))
     gift(c, uid, json.loads(o["item"])); gift(c, o["frm"], {"t": "bal", "v": o["price"]}); c.commit()
     notify(o["frm"], "✅ Ваше предложение принято!\n%s\nВам начислено: %s сум" % (item_txt(json.loads(o["item"])), fnum(o["price"])))
     return {"ok": 1}
@@ -1497,6 +1584,7 @@ def duel_create(b):
     except (TypeError, ValueError): raise HTTPException(400, "Неверная ставка")
     if stake not in DUEL_STAKES: raise HTTPException(400, "Неверная ставка")
     need_own(c, uid, plate)
+    if uid not in HIDDEN and lim_hit("duel", uid, 1, DUEL_DAY): raise HTTPException(400, "Лимит дуэлей на сегодня исчерпан")
     if c.execute("SELECT COUNT(*) FROM duels WHERE a=? AND status='open'", (uid,)).fetchone()[0] >= 3:
         raise HTTPException(400, "Не больше 3 открытых вызовов")
     c.execute("INSERT INTO duels(a,aplate,stake,ts) VALUES(?,?,?,?)", (uid, json.dumps(plate), stake, int(time.time()))); c.commit(); _DU[0] = 0
@@ -1511,6 +1599,9 @@ def duel_accept(b):
     d = c.execute("SELECT * FROM duels WHERE id=? AND status='open'", (did,)).fetchone()
     if not d: raise HTTPException(400, "Вызов уже принят или отменён")
     if d["a"] == uid: raise HTTPException(400, "Нельзя принять свой вызов")
+    if uid not in HIDDEN and lim_hit("duel", uid, 1, DUEL_DAY): raise HTTPException(400, "Лимит дуэлей на сегодня исчерпан")
+    if d["stake"] >= 2000000 and c.execute("SELECT 1 FROM duels WHERE status='done' AND ((a=? AND b=?) OR (a=? AND b=?)) AND ts>? LIMIT 6 OFFSET 5", (uid, d["a"], d["a"], uid, int(time.time()) - 86400)).fetchone():
+        raise HTTPException(400, "Слишком много дуэлей с одним и тем же игроком")
     if c.execute("UPDATE duels SET status='done',b=?,bplate=? WHERE id=? AND status='open'", (uid, json.dumps(bplate), did)).rowcount != 1:
         raise HTTPException(400, "Вызов уже принят или отменён")
     aplate = json.loads(d["aplate"]); pa = duel_p(tier_py(aplate), tier_py(bplate))
@@ -1664,6 +1755,8 @@ def db_report():   # текст для команды /stat в боте
     return "\n".join(out)
 
 def _bg():   # фоновый поток: торги, системные лоты, чистка и копии (не зависит от нагрузки на сайт)
+    try: bibisha_purge()
+    except Exception: log.exception("bibisha_purge")
     try: bal_backfill()
     except Exception: log.exception("bal_backfill")
     try: uniq_backfill()
