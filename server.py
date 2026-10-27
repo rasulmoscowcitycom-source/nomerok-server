@@ -1728,15 +1728,49 @@ CAR_STATS = {   # л.с., Нм, разгон 0-100 (с), масса (кг)
 CAR_DEF = [(90, 120, 13, 1100), (150, 200, 9, 1400), (250, 350, 6.5, 1700), (450, 600, 4.5, 2000), (700, 850, 3.2, 1900)]
 TUNE_PARTS = ("s", "su", "ti", "li", "ae", "ni")   # Stage, подвеска, шины, облегчение, аэродинамика, нитро
 TUNE_LV = tuple(int(x) for x in os.environ.get("TUNE_LV", "20,35,50").split(","))   # уровень игрока для Stage 1/2/3
-TUNE_CH = {1: 1.0, 2: .85, 3: .70}              # шанс успешно поднять часть до этого уровня; провал: уровень части падает на 1
+TUNE_CH = {1: 1.0, 2: .85, 3: .70, 4: 1.0}              # шанс успешно поднять часть до этого уровня; провал: уровень части падает на 1
 TUNE_MIN_T = 3                                    # тюнинг только Легендарные и Секретные машины
 TUNE_INS = int(os.environ.get("TUNE_INS", 29))   # страховка за ⭐: при провале уровень не падает
-S_HP = (0, .10, .22, .35); S_NM = (0, .08, .18, .30); L_KG = (0, .03, .06, .09); T_TM = (0, .012, .024, .036); SU_SG = (0, .12, .24, .36); T_AE = (0, .010, .020, .030); T_NI = (0, .012, .025, .040)
+TUNE_GOLD = {"s": int(os.environ.get("GOLD_STAGE", 77)), "su": 29, "ti": 29, "li": 35, "ae": 35, "ni": 45}   # золотой уровень (4) - только за ⭐, всегда удаётся, нужен уровень 3
+S_HP = (0, .10, .22, .35, .55); S_NM = (0, .08, .18, .30, .46); L_KG = (0, .03, .06, .09, .14); TI_MU = (0, .04, .08, .12, .20); SU_SG = (0, .12, .24, .36, .55); NIT_P = (0, .10, .20, .32, .50)
 
 def tn_of(tn):
-    try: v = [max(0, min(3, int(x))) for x in tn][:6]
+    try: v = [max(0, min(4, int(x))) for x in tn][:6]
     except Exception: v = []
     return (v + [0] * 6)[:6]
+
+G = 9.81
+def _sim(eff, kg, mu, cal, ae=0, ni=0, dist=402.0, to100=False):
+    """Физика заезда: мощность, масса, сцепление шин, сопротивление воздуха, переключения передач, нитро. Возвращает (разгон 0-100, время на дистанции)."""
+    m = kg + 85.0; P = eff * 745.7 * .88 * cal; cda = .62 * (1 - .10 * ae); crr = .014 * m * G
+    at = mu * G * (1 + .03 * ae); th = (17.0, 30.0, 44.0, 60.0, 78.0); sh = max(.10, .30 - eff / 5200.); nb = NIT_P[ni]
+    v = x = t = 0.0; dt = .01; gear = 0; blk = -1.0; t100 = None; n0 = None
+    while t < 90.0:
+        if x >= .35 * dist and n0 is None: n0 = t
+        boost = 1 + nb if (n0 is not None and t - n0 < 3.0) else 1.0
+        F = 0.0 if t < blk else min(m * at, P * boost / max(v, 3.0))
+        a = (F - (.5 * 1.2 * cda * v * v + crr)) / m
+        v = max(0.0, v + a * dt); x += v * dt; t += dt
+        if gear < 5 and v >= th[gear]: gear += 1; blk = t + sh
+        if t100 is None and v >= 27.78: t100 = t
+        if to100 and t100 is not None: return t100, None
+        if x >= dist: return (t100 if t100 is not None else t), t
+    return (t100 if t100 is not None else 90.0), 90.0
+
+_CAL = {}
+def _calib(hp0, nm0, kg0, t0):   # подгонка под паспортный разгон 0-100 серийной машины
+    key = (hp0, nm0, kg0, t0)
+    if key in _CAL: return _CAL[key]
+    eff = .65 * hp0 + .35 * nm0 * .72; mu = 1.0
+    while True:
+        if _sim(eff, kg0, mu, 6.0, to100=True)[0] > t0 and mu < 2.4: mu *= 1.06; continue
+        lo, hi = .15, 6.0
+        for _ in range(22):
+            mid = (lo + hi) / 2
+            if _sim(eff, kg0, mu, mid, to100=True)[0] > t0: lo = mid
+            else: hi = mid
+        break
+    _CAL[key] = (mu, (lo + hi) / 2); return _CAL[key]
 
 def car_stats(name, t, tn):
     base = CAR_STATS.get(name)
@@ -1746,13 +1780,13 @@ def car_stats(name, t, tn):
     if not base: base = CAR_DEF[max(0, min(4, int(t or 0)))]
     hp0, nm0, t0, kg0 = base; s, su, ti, li, ae, ni = tn_of(tn)
     hp = hp0 * (1 + S_HP[s]); nm = nm0 * (1 + S_NM[s]); kg = kg0 * (1 - L_KG[li])
-    t100 = t0 * ((kg / kg0) * (hp0 / hp)) ** .5 * (1 - T_TM[ti] * 2.5) * (1 - T_AE[ae] * 1.5) * (1 - T_NI[ni] * 1.5)
-    return {"hp": round(hp), "nm": round(nm), "t100": round(t100, 1), "kg": round(kg), "tn": [s, su, ti, li, ae, ni]}
+    mu0, cal = _calib(hp0, nm0, kg0, t0); mu = mu0 * (1 + TI_MU[ti]); eff = .65 * hp + .35 * nm * .72
+    t100, tt = _sim(eff, kg, mu, cal, ae, ni)
+    return {"hp": round(hp), "nm": round(nm), "t100": round(t100, 1), "kg": round(kg), "tn": [s, su, ti, li, ae, ni], "tt": round(tt, 3), "mu": round(mu, 4), "cal": round(cal, 4), "ef": round(eff, 1)}
 
 def race_time(st, rnd):
-    eff = .65 * st["hp"] + .35 * st["nm"] * .72
-    sg = .03 * (1 - SU_SG[st["tn"][1]])
-    return 11.0 * (st["kg"] / eff) ** (1 / 3) * (1 - T_TM[st["tn"][2]]) * (1 - T_AE[st["tn"][4]]) * (1 - T_NI[st["tn"][5]]) * (1 + max(-3 * sg, min(3 * sg, rnd.gauss(0, sg))))
+    sg = .025 * (1 - SU_SG[st["tn"][1]])
+    return st["tt"] * (1 + max(-3 * sg, min(3 * sg, rnd.gauss(0, sg))))
 
 def race_chance(sa, sb, n=1500):
     r = random.Random(); w = 0
@@ -1807,17 +1841,19 @@ def tune(b):
     if int(x.get("t") or 0) < TUNE_MIN_T: raise HTTPException(400, "Тюнинг доступен только Легендарным и Секретным машинам")
     if not x.get("id"): x["id"] = "%010x" % random.SystemRandom().getrandbits(40)
     cid = x["id"]; row = tune_row(c, uid, cid); i = TUNE_PARTS.index(part); lvl = row[i]
-    if lvl >= 3: raise HTTPException(400, "Деталь уже на максимальном уровне")
-    if part == "s" and int(st.get("lv") or 1) < TUNE_LV[lvl]: raise HTTPException(400, "Для Stage %d нужен %d уровень игрока" % (lvl + 1, TUNE_LV[lvl]))
-    if ins: wspend(c, uid, TUNE_INS, "tune-ins")
-    ok = random.SystemRandom().random() < TUNE_CH[lvl + 1]
+    if lvl >= 4: raise HTTPException(400, "Деталь уже золотая (максимум)")
+    gold = lvl == 3
+    if not gold and part == "s" and int(st.get("lv") or 1) < TUNE_LV[lvl]: raise HTTPException(400, "Для Stage %d нужен %d уровень игрока" % (lvl + 1, TUNE_LV[lvl]))
+    if gold: ins = False; wspend(c, uid, TUNE_GOLD[part], "tune-gold")
+    elif ins: wspend(c, uid, TUNE_INS, "tune-ins")
+    ok = True if gold else random.SystemRandom().random() < TUNE_CH[lvl + 1]
     if ok: row[i] = lvl + 1
     elif not ins: row[i] = max(0, lvl - 1)
     c.execute("INSERT OR REPLACE INTO car_tune(uid,cid,s,su,ti,li,ae,ni) VALUES(?,?,?,?,?,?,?,?)", (uid, cid, *row))
     x["tn"] = list(row); _usave(c, uid, st)
     _pend_add(c, uid, {"id": cid, "n": cc["n"], "t": cc["t"], "m": cc["m"], "pl": cc["pl"], "tn": row}, -2)
     c.commit()
-    return {"ok": 1, "id": cid, "tn": row, "success": ok, "ins": ins, "lost": (not ok) and (not ins) and lvl > 0, "stars": stars_of(c, uid)}
+    return {"ok": 1, "id": cid, "tn": row, "success": ok, "ins": ins, "lost": (not ok) and (not ins) and lvl > 0, "gold": gold, "stars": stars_of(c, uid)}
 
 def _count_pl(st, p): return sum(1 for x in (st.get("col") or []) if _same_pl(x, p))
 
