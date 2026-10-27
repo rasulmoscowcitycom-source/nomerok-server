@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS deal_used(uid INTEGER,day INTEGER,PRIMARY KEY(uid,day
 CREATE TABLE IF NOT EXISTS uniq(key TEXT PRIMARY KEY,owner INT,ts INT);
 CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open');
 CREATE TABLE IF NOT EXISTS shop(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,price INT,ts INT,status TEXT DEFAULT 'open',buyer INT);
+CREATE TABLE IF NOT EXISTS upg_pend(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,pk TEXT,win INT,newm INT,ts INT);
+CREATE INDEX IF NOT EXISTS ix_upgp ON upg_pend(uid);
 CREATE TABLE IF NOT EXISTS duels(id INTEGER PRIMARY KEY AUTOINCREMENT,a INT,aplate TEXT,stake INT,ts INT,status TEXT DEFAULT 'open',b INT,bplate TEXT,winner INT);
 CREATE TABLE IF NOT EXISTS claims(uid INT,id TEXT,PRIMARY KEY(uid,id));
 CREATE TABLE IF NOT EXISTS payments(charge TEXT PRIMARY KEY,uid INT,item TEXT,stars INT,ts INT);
@@ -582,6 +584,11 @@ def save(b):
     if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
     if not st.get("cl2") and isinstance(st.get("cars"), list):   # старый клиент: Бибиша теперь только по команде, лишние убираем
         st["cars"] = [x for x in st["cars"] if not (isinstance(x, dict) and "Бибиша" in str(x.get("n", "")))]
+    try:   # недавние апгрейды: старое сохранение не должно вернуть сгоревший номер
+        c.execute("DELETE FROM upg_pend WHERE ts<?", (int(time.time()) - 120,))
+        for r_ in c.execute("SELECT pk,win,newm FROM upg_pend WHERE uid=? ORDER BY id", (uid,)).fetchall():
+            _upg_apply(st, json.loads(r_["pk"]), r_["win"], r_["newm"])
+    except Exception: log.exception("upg_pend")
     dups = uniq_guard(c, uid, st); own = st.pop("_own", 0); rb = None
     try:
         o0 = c.execute("SELECT bal,state FROM users WHERE id=?", (uid,)).fetchone()
@@ -1302,6 +1309,22 @@ def auc_cancel(b):   # продавец снимает свой лот, если
     return {"ok": 1}
 
 # ---------------------------------------------------------------- покупки за звёздный баланс
+def _same_pl(x, p):   # тот же номер с тем же множителем
+    if not isinstance(x, dict): return False
+    try: q = clean_plate(x)
+    except HTTPException: return False
+    return all(q.get(k) == p.get(k) for k in ("k", "r", "d", "z", "a")) and (q.get("m") or 1) == (p.get("m") or 1)
+
+def _upg_apply(st, p, win, newm):   # результат апгрейда применяется на сервере: выйти из игры и оставить номер нельзя
+    col = st.get("col")
+    if not isinstance(col, list): return False
+    for i, x in enumerate(col):
+        if _same_pl(x, p):
+            if win: x["m"] = newm
+            else: col.pop(i)
+            return True
+    return False
+
 @api("/api/upg")
 def upg(b):
     """Апгрейд-колесо: выбираем множитель х2/х5/х10, шанс = 94%/множитель. Выигрыш - стоимость номера растёт, проигрыш - номер сгорает
@@ -1312,14 +1335,23 @@ def upg(b):
     if x not in UPG_X: raise HTTPException(400, "Неверный множитель")
     if (p.get("m") or 1) * x > UPG_MAXM: raise HTTPException(400, "Максимальный множитель номера ×%d" % UPG_MAXM)
     need_own(c, uid, p)
+    ur = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
+    try: ust = json.loads(ur["state"]) if ur and ur["state"] else {}
+    except Exception: ust = {}
+    if not any(_same_pl(x, p) for x in (ust.get("col") or [])): raise HTTPException(400, "Номер не найден в гараже (обновите игру)")
     ins = bool(b.get("ins"))
     if ins: wspend(c, uid, UPG_INS, "upg-ins")
     rtp = float(event_of(c).get("upg") or UPG_RTP); ch = min(.95, round(rtp / x * 1000) / 1000)
     win = random.SystemRandom().random() < ch
     if not win and not ins and tier_py(p) >= 4:
-        c.execute("UPDATE uniq SET owner=0 WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()
+        c.execute("UPDATE uniq SET owner=0 WHERE key=? AND owner=?", (ukey(p), uid))
+    newm = (p.get("m") or 1) * x
+    if win or not ins:   # итог сразу записываем в сохранение игрока и держим 2 минуты на случай устаревших сохранений
+        _upg_apply(ust, p, win, newm)
+        c.execute("UPDATE users SET state=? WHERE id=?", (json.dumps(ust, separators=(",", ":")), uid))
+        c.execute("INSERT INTO upg_pend(uid,pk,win,newm,ts) VALUES(?,?,?,?,?)", (uid, json.dumps(p, sort_keys=True), 1 if win else 0, newm, int(time.time())))
     c.commit()
-    return {"ok": 1, "win": win, "ch": ch, "ins": ins, "m": (p.get("m") or 1) * x if win else (p.get("m") or 1), "stars": stars_of(c, uid)}
+    return {"ok": 1, "win": win, "ch": ch, "ins": ins, "m": newm if win else (p.get("m") or 1), "stars": stars_of(c, uid)}
 
 
 # ---------------------------------------------------------------- сезон, скидка дня и Battle Pass
