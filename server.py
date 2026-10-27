@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS deal_used(uid INTEGER,day INTEGER,PRIMARY KEY(uid,day
 CREATE TABLE IF NOT EXISTS uniq(key TEXT PRIMARY KEY,owner INT,ts INT);
 CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open');
 CREATE TABLE IF NOT EXISTS shop(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,price INT,ts INT,status TEXT DEFAULT 'open',buyer INT);
-CREATE TABLE IF NOT EXISTS car_tune(uid INT,cid TEXT,s INT DEFAULT 0,su INT DEFAULT 0,ti INT DEFAULT 0,li INT DEFAULT 0,PRIMARY KEY(uid,cid));
+CREATE TABLE IF NOT EXISTS car_tune(uid INT,cid TEXT,s INT DEFAULT 0,su INT DEFAULT 0,ti INT DEFAULT 0,li INT DEFAULT 0,ae INT DEFAULT 0,ni INT DEFAULT 0,PRIMARY KEY(uid,cid));
 CREATE INDEX IF NOT EXISTS ix_ctcid ON car_tune(cid);
 CREATE TABLE IF NOT EXISTS races(id INTEGER PRIMARY KEY AUTOINCREMENT,a INT,acar TEXT,stype TEXT,sval INT,aitem TEXT,ts INT,status TEXT DEFAULT 'open',b INT,bcar TEXT,bitem TEXT,result TEXT,winner INT);
 CREATE TABLE IF NOT EXISTS upg_pend(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,pk TEXT,win INT,newm INT,ts INT,cnt INT DEFAULT 0);
@@ -82,6 +82,9 @@ def init_db():   # один раз при запуске: таблицы, инд
         c.execute("PRAGMA journal_mode=WAL"); c.executescript(SCHEMA)
         try: c.execute("ALTER TABLE upg_pend ADD COLUMN cnt INT DEFAULT 0")
         except Exception: pass
+        for col_ in ("ae", "ni"):
+            try: c.execute("ALTER TABLE car_tune ADD COLUMN %s INT DEFAULT 0" % col_)
+            except Exception: pass
         try: c.execute("ALTER TABLE users ADD COLUMN bal INT DEFAULT 0")
         except sqlite3.OperationalError: pass
         try: c.execute("ALTER TABLE users ADD COLUMN stars INT DEFAULT 0")   # звёздный кошелёк игрока (хранится на сервере)
@@ -265,12 +268,12 @@ def gift(c, uid, d):
         if d.get("t") == "car" and isinstance(d.get("v"), dict):
             v = d["v"]; cid = v.get("id")
             if cid:
-                r = c.execute("SELECT uid,s,su,ti,li FROM car_tune WHERE cid=? LIMIT 1", (str(cid),)).fetchone()
+                r = c.execute("SELECT uid,s,su,ti,li,ae,ni FROM car_tune WHERE cid=? LIMIT 1", (str(cid),)).fetchone()
                 if r:
                     if r["uid"] != uid:
                         c.execute("DELETE FROM car_tune WHERE uid=? AND cid=?", (uid, str(cid)))
                         c.execute("UPDATE car_tune SET uid=? WHERE uid=? AND cid=?", (uid, r["uid"], str(cid)))
-                    v["tn"] = [r["s"], r["su"], r["ti"], r["li"]]
+                    v["tn"] = [r["s"], r["su"], r["ti"], r["li"], r["ae"] or 0, r["ni"] or 0]
                 else: v.pop("id", None); v.pop("tn", None)
             else: v.pop("tn", None)
     except Exception: log.exception("gift tune")
@@ -1723,16 +1726,17 @@ CAR_STATS = {   # л.с., Нм, разгон 0-100 (с), масса (кг)
  "Lamborghini Aventador SVJ": (770, 720, 2.8, 1525), "Bugatti Veyron": (1001, 1250, 2.5, 1888), "Porsche Carrera GT": (612, 590, 3.5, 1380), "McLaren P1": (916, 900, 2.8, 1490),
  "Lamborghini Revuelto": (1015, 807, 2.5, 1772)}
 CAR_DEF = [(90, 120, 13, 1100), (150, 200, 9, 1400), (250, 350, 6.5, 1700), (450, 600, 4.5, 2000), (700, 850, 3.2, 1900)]
-TUNE_PARTS = ("s", "su", "ti", "li")            # Stage, подвеска, шины, облегчение
+TUNE_PARTS = ("s", "su", "ti", "li", "ae", "ni")   # Stage, подвеска, шины, облегчение, аэродинамика, нитро
+TUNE_LV = tuple(int(x) for x in os.environ.get("TUNE_LV", "20,35,50").split(","))   # уровень игрока для Stage 1/2/3
 TUNE_CH = {1: 1.0, 2: .85, 3: .70}              # шанс успешно поднять часть до этого уровня; провал: уровень части падает на 1
 TUNE_MIN_T = 3                                    # тюнинг только Легендарные и Секретные машины
 TUNE_INS = int(os.environ.get("TUNE_INS", 29))   # страховка за ⭐: при провале уровень не падает
-S_HP = (0, .10, .22, .35); S_NM = (0, .08, .18, .30); L_KG = (0, .03, .06, .09); T_TM = (0, .012, .024, .036); SU_SG = (0, .12, .24, .36)
+S_HP = (0, .10, .22, .35); S_NM = (0, .08, .18, .30); L_KG = (0, .03, .06, .09); T_TM = (0, .012, .024, .036); SU_SG = (0, .12, .24, .36); T_AE = (0, .010, .020, .030); T_NI = (0, .012, .025, .040)
 
 def tn_of(tn):
-    try: v = [max(0, min(3, int(x))) for x in tn][:4]
+    try: v = [max(0, min(3, int(x))) for x in tn][:6]
     except Exception: v = []
-    return (v + [0, 0, 0, 0])[:4]
+    return (v + [0] * 6)[:6]
 
 def car_stats(name, t, tn):
     base = CAR_STATS.get(name)
@@ -1740,15 +1744,15 @@ def car_stats(name, t, tn):
         for k, v in CAR_STATS.items():
             if name.startswith(k.split(" «")[0]) and "«" in name: base = v; break
     if not base: base = CAR_DEF[max(0, min(4, int(t or 0)))]
-    hp0, nm0, t0, kg0 = base; s, su, ti, li = tn_of(tn)
+    hp0, nm0, t0, kg0 = base; s, su, ti, li, ae, ni = tn_of(tn)
     hp = hp0 * (1 + S_HP[s]); nm = nm0 * (1 + S_NM[s]); kg = kg0 * (1 - L_KG[li])
-    t100 = t0 * ((kg / kg0) * (hp0 / hp)) ** .5 * (1 - T_TM[ti] * 2.5)
-    return {"hp": round(hp), "nm": round(nm), "t100": round(t100, 1), "kg": round(kg), "tn": [s, su, ti, li]}
+    t100 = t0 * ((kg / kg0) * (hp0 / hp)) ** .5 * (1 - T_TM[ti] * 2.5) * (1 - T_AE[ae] * 1.5) * (1 - T_NI[ni] * 1.5)
+    return {"hp": round(hp), "nm": round(nm), "t100": round(t100, 1), "kg": round(kg), "tn": [s, su, ti, li, ae, ni]}
 
 def race_time(st, rnd):
     eff = .65 * st["hp"] + .35 * st["nm"] * .72
     sg = .03 * (1 - SU_SG[st["tn"][1]])
-    return 11.0 * (st["kg"] / eff) ** (1 / 3) * (1 - T_TM[st["tn"][2]]) * (1 + max(-3 * sg, min(3 * sg, rnd.gauss(0, sg))))
+    return 11.0 * (st["kg"] / eff) ** (1 / 3) * (1 - T_TM[st["tn"][2]]) * (1 - T_AE[st["tn"][4]]) * (1 - T_NI[st["tn"][5]]) * (1 + max(-3 * sg, min(3 * sg, rnd.gauss(0, sg))))
 
 def race_chance(sa, sb, n=1500):
     r = random.Random(); w = 0
@@ -1775,8 +1779,8 @@ def _ustate(c, uid):
 def _usave(c, uid, st): c.execute("UPDATE users SET state=? WHERE id=?", (json.dumps(st, separators=(",", ":")), uid))
 
 def tune_row(c, uid, cid):
-    r = c.execute("SELECT s,su,ti,li FROM car_tune WHERE uid=? AND cid=?", (uid, cid)).fetchone()
-    return [r["s"], r["su"], r["ti"], r["li"]] if r else [0, 0, 0, 0]
+    r = c.execute("SELECT s,su,ti,li,ae,ni FROM car_tune WHERE uid=? AND cid=?", (uid, cid)).fetchone()
+    return [r["s"], r["su"], r["ti"], r["li"], r["ae"] or 0, r["ni"] or 0] if r else [0] * 6
 
 def _tune_apply(c, uid, st):   # сервер - хозяин уровней тюнинга: что бы ни прислал телефон, берём из базы
     for x in (st.get("cars") or []):
@@ -1790,7 +1794,7 @@ def race_car(c, uid, st, car):
     cc = {"n": str(car.get("n") or "")[:60], "t": int(car.get("t") or 0), "m": car.get("m") or 1, "pl": car.get("pl"), "id": str(car.get("id") or "")[:20] or None}
     x = _find_car(st, cc)
     if not x: raise HTTPException(400, "Этой машины нет в вашем гараже (обновите игру)")
-    tn = tune_row(c, uid, x["id"]) if x.get("id") else [0, 0, 0, 0]
+    tn = tune_row(c, uid, x["id"]) if x.get("id") else [0] * 6
     return x, car_stats(x.get("n", ""), x.get("t"), tn)
 
 @api("/api/tune")
@@ -1804,11 +1808,12 @@ def tune(b):
     if not x.get("id"): x["id"] = "%010x" % random.SystemRandom().getrandbits(40)
     cid = x["id"]; row = tune_row(c, uid, cid); i = TUNE_PARTS.index(part); lvl = row[i]
     if lvl >= 3: raise HTTPException(400, "Деталь уже на максимальном уровне")
+    if part == "s" and int(st.get("lv") or 1) < TUNE_LV[lvl]: raise HTTPException(400, "Для Stage %d нужен %d уровень игрока" % (lvl + 1, TUNE_LV[lvl]))
     if ins: wspend(c, uid, TUNE_INS, "tune-ins")
     ok = random.SystemRandom().random() < TUNE_CH[lvl + 1]
     if ok: row[i] = lvl + 1
     elif not ins: row[i] = max(0, lvl - 1)
-    c.execute("INSERT OR REPLACE INTO car_tune(uid,cid,s,su,ti,li) VALUES(?,?,?,?,?,?)", (uid, cid, *row))
+    c.execute("INSERT OR REPLACE INTO car_tune(uid,cid,s,su,ti,li,ae,ni) VALUES(?,?,?,?,?,?,?,?)", (uid, cid, *row))
     x["tn"] = list(row); _usave(c, uid, st)
     _pend_add(c, uid, {"id": cid, "n": cc["n"], "t": cc["t"], "m": cc["m"], "pl": cc["pl"], "tn": row}, -2)
     c.commit()
@@ -1935,7 +1940,7 @@ def race_accept(b):
     xa = _find_car(sta, {"n": ac["n"], "t": ac["t"], "m": ac["m"], "pl": ac["pl"], "id": ac.get("id")})
     if not xa:   # соперник продал или потерял машину - заезд отменяется, ставка возвращается
         _race_refund(c, r, "машина соперника больше не в гараже"); c.commit(); raise HTTPException(400, "У соперника больше нет этой машины, заезд отменён")
-    sa = car_stats(xa.get("n", ""), xa.get("t"), tune_row(c, r["a"], xa["id"]) if xa.get("id") else [0, 0, 0, 0])
+    sa = car_stats(xa.get("n", ""), xa.get("t"), tune_row(c, r["a"], xa["id"]) if xa.get("id") else [0] * 6)
     bitem = None
     if r["stype"] == "item":
         bitem, tb = _item_ok(c, uid, st, b.get("item")); ai = json.loads(r["aitem"])
@@ -1984,6 +1989,67 @@ def race_expire(c):
         _race_refund(c, r); notes.append((r["a"], "⌛ Ваш заезд никто не принял за сутки. Ставка вернулась.", "🏁 Открыть игру"))
     if notes: c.commit()
     for n in notes: notify(*n)
+
+# ---- гонки с ботом: соперник подбирается под вашу машину, выигрыш считается по честному шансу (в среднем ставка не растёт)
+BOT_STAKES = {"bal": (100000, 500000, 2000000, 10000000), "stars": (10, 25, 50)}
+BOT_DAY = int(os.environ.get("BOT_DAY", 40))                    # заездов с ботом в сутки
+BOT_BAL_DAY = int(os.environ.get("BOT_BAL_DAY", 200 * 10 ** 6))  # сумма ставок сумами с ботом в сутки
+BOT_NAMES = ["Жасур", "Азиз", "Тимур", "Бобур", "Санжар", "Рустам", "Дилшод", "Фарход", "Нодир", "Отабек", "Ойбек", "Шохрух"]
+_BOT = {}   # uid -> предложение бота (живёт 10 минут, используется один раз)
+
+def _bot_pick(mine):
+    """Выбрать машину бота так, чтобы шанс игрока был 30-70%, и посчитать множитель выигрыша: шанс * множитель = 0,95."""
+    rnd = random.SystemRandom(); names = list(CAR_STATS.keys()); rnd.shuffle(names); best = None
+    for nm in names:
+        if "«" in nm or nm in ("Zeekr 9X",): continue
+        bst = car_stats(nm, 0, [0] * 6)
+        # у бота случайный лёгкий тюнинг: чтобы соперники не были одинаковыми
+        bst = car_stats(nm, 0, [rnd.randint(0, 1), 0, 0, 0, 0, 0] if rnd.random() < .3 else [0] * 6)
+        ch = race_chance(mine, bst, 1200)
+        if best is None or abs(ch - .5) < abs(best[1] - .5): best = (nm, ch, bst)
+        if .32 <= ch <= .68: best = (nm, ch, bst); break
+    nm, ch, bst = best
+    ch = race_chance(mine, bst, 4000)
+    ch = max(.05, min(.95, ch)); mult = round(max(1.01, min(3.5, .95 / (math.ceil(ch * 20) / 20))), 2)   # шанс округляем вверх: у заведения всегда небольшой плюс
+    return nm, ch, bst, mult
+
+@api("/api/race/bot/offer")
+def race_bot_offer(b):
+    uid, _ = auth(b.get("initData")); c = db(); st = _ustate(c, uid)
+    x, cs = race_car(c, uid, st, b.get("car"))
+    if uid not in HIDDEN and lim_hit("botoffer", uid, 1, 300): raise HTTPException(400, "Слишком много запросов, попробуйте позже")
+    nm, ch, bst, mult = _bot_pick(cs)
+    off = {"car": {"n": x.get("n"), "t": x.get("t"), "m": x.get("m"), "id": x.get("id")}, "bot": {"n": nm, "st": bst, "name": "Бот " + random.choice(BOT_NAMES)}, "chance": ch, "mult": mult, "ts": time.time()}
+    _BOT[uid] = off
+    if len(_BOT) > 20000: _BOT.clear()
+    return {"ok": 1, "bot": off["bot"], "chance": round(ch * 100), "mult": mult, "st": cs, "stakes": {k: list(v) for k, v in BOT_STAKES.items()}}
+
+@api("/api/race/bot/go")
+def race_bot_go(b):
+    uid, uname = auth(b.get("initData")); c = db(); st = _ustate(c, uid); typ = b.get("stype")
+    off = _BOT.get(uid)
+    if not off or time.time() - off["ts"] > 600: raise HTTPException(400, "Соперник устарел, найдите нового")
+    if typ not in ("bal", "stars"): raise HTTPException(400, "Неверная ставка")
+    try: stake = int(b.get("stake", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверная ставка")
+    if stake not in BOT_STAKES[typ]: raise HTTPException(400, "Неверная ставка")
+    x, cs = race_car(c, uid, st, b.get("car"))
+    oc = off["car"]
+    if oc["n"] != x.get("n") or (oc.get("id") or None) != (x.get("id") or None): raise HTTPException(400, "Машина изменилась, найдите соперника заново")
+    if uid not in HIDDEN:
+        if lim_hit("bot", uid, 1, BOT_DAY): raise HTTPException(400, "Лимит заездов с ботом на сегодня исчерпан")
+        if typ == "bal" and lim_hit("botbal", uid, stake, BOT_BAL_DAY): raise HTTPException(400, "Дневной лимит ставок сумами с ботом исчерпан")
+    _BOT.pop(uid, None)
+    if typ == "stars": wspend(c, uid, stake, "race-bot")
+    rnd = random.SystemRandom(); tA = race_time(cs, rnd); tB = race_time(off["bot"]["st"], rnd); win = tA < tB; pay = 0
+    if win:
+        pay = int(stake * off["mult"])
+        if typ == "bal": gift(c, uid, {"t": "bal", "v": pay})
+        else: wadd(c, uid, pay, "race-bot-win")
+    c.commit()
+    res = {"a": {"n": x.get("n"), "pl": x.get("pl"), "st": cs, "t": round(tA, 2), "name": str(uname)[:24]}, "b": {"n": off["bot"]["n"], "pl": None, "st": off["bot"]["st"], "t": round(tB, 2), "name": off["bot"]["name"]},
+           "pay": pay, "stake": stake, "stype": typ, "bot": 1}
+    return {"ok": 1, "win": win, "res": res, "stars": stars_of(c, uid)}
 
 # эксклюзивные машины: их нельзя выбить в рулетке, они появляются только как системные лоты аукциона
 EXC = [("Rolls-Royce Spectre", 3.5), ("Lamborghini Aventador SVJ", 3.2), ("Ferrari 812 Superfast", 3), ("Bugatti Veyron", 4),
