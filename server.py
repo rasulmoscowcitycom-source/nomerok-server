@@ -22,6 +22,7 @@ REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL", "@your_channel")          
 REQUIRED_URL = os.environ.get("REQUIRED_URL", "https://t.me/your_channel")   # ссылка на этот канал
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "your_bot")                    # логин бота без @ (для ссылок-приглашений)
 REF_MILESTONES = [(1, 3000000), (3, 10000000), (5, 25000000), (10, 100000000)]  # друзья -> приз (сум)
+REF_LUCK = (20, 1440)   # 20 друзей -> удача ×2 на 24 часа (минуты)
 HERE = os.path.dirname(os.path.abspath(__file__))
 BK_DIR = os.environ.get("BACKUP_DIR") or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
 BK_KEEP = int(os.environ.get("BACKUP_KEEP", "5"))
@@ -93,7 +94,7 @@ def init_db():   # один раз при запуске: таблицы, инд
         c.execute("CREATE TABLE IF NOT EXISTS star_auc(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,start INT,top INT DEFAULT 0,topuid INT,end INT,status TEXT DEFAULT 'open')")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sa_status ON star_auc(status,end)")
         c.execute("CREATE TABLE IF NOT EXISTS wallets(uid INTEGER PRIMARY KEY,addr TEXT,ts INT)")
-        for q in ("ALTER TABLE users ADD COLUMN mute INT DEFAULT 0", "ALTER TABLE users ADD COLUMN rem INT DEFAULT 0", "ALTER TABLE events ADD COLUMN upg REAL", "ALTER TABLE users ADD COLUMN ton INT DEFAULT 0", "ALTER TABLE wallets ADD COLUMN ver INT DEFAULT 0"):
+        for q in ("ALTER TABLE users ADD COLUMN mute INT DEFAULT 0", "ALTER TABLE users ADD COLUMN rem INT DEFAULT 0", "ALTER TABLE events ADD COLUMN upg REAL", "ALTER TABLE users ADD COLUMN ton INT DEFAULT 0", "ALTER TABLE wallets ADD COLUMN ver INT DEFAULT 0", "ALTER TABLE races ADD COLUMN aseen INT"):
             try: c.execute(q)
             except sqlite3.OperationalError: pass
         try: c.execute("ALTER TABLE nft ADD COLUMN item TEXT")
@@ -420,6 +421,7 @@ def ref_credit(c, uid):  # засчитать приглашение, когда
     n = c.execute("SELECT COUNT(*) FROM referrals WHERE ref=?", (p["ref"],)).fetchone()[0]
     for need, reward in REF_MILESTONES:
         if n == need: gift(c, p["ref"], {"t": "bal", "v": reward})
+    if n == REF_LUCK[0]: gift(c, p["ref"], {"t": "boost", "k": "bl", "v": REF_LUCK[1]})
 
 def _bal_of(st):
     try: v = int(float(st.get("bal") or 0))
@@ -1984,7 +1986,7 @@ def race_accept(b):
         if bitem["t"] != ai["t"] or tb < ta_: raise HTTPException(400, "Нужен предмет того же вида и не ниже классом")
         if bitem["t"] == "car" and bitem["v"].get("id") and bitem["v"].get("id") == xb.get("id"): raise HTTPException(400, "Машина-ставка не может быть вашей гоночной машиной")
     elif r["stype"] == "stars": wspend(c, uid, r["sval"], "race-stake")
-    if c.execute("UPDATE races SET status='done',b=? WHERE id=? AND status='open'", (uid, rid)).rowcount != 1:
+    if c.execute("UPDATE races SET status='done',b=?,aseen=0 WHERE id=? AND status='open'", (uid, rid)).rowcount != 1:
         raise HTTPException(400, "Заезд уже принят или отменён")
     rnd = random.SystemRandom(); tA = race_time(sa, rnd); tB = race_time(sb, rnd)
     chance_a = race_chance(sa, sb)
@@ -2008,6 +2010,21 @@ def _race_refund(c, r, why=""):   # вернуть ставку создател
     if r["stype"] == "bal": gift(c, r["a"], {"t": "bal", "v": r["sval"]})
     elif r["stype"] == "stars": wadd(c, r["a"], r["sval"], "race-refund")
     elif r["aitem"]: gift(c, r["a"], json.loads(r["aitem"]))
+
+@api("/api/race/pending")
+def race_pending(b):   # принятый вызов, который создатель ещё не видел (уведомление внутри игры)
+    uid, _ = auth(b.get("initData")); c = db()
+    r = c.execute("SELECT r.*,ub.name bn FROM races r LEFT JOIN users ub ON ub.id=r.b WHERE r.status='done' AND r.a=? AND r.aseen=0 ORDER BY r.id LIMIT 1", (uid,)).fetchone()
+    if not r or not r["result"]: return {"p": None}
+    return {"p": {"id": r["id"], "win": r["winner"] == uid, "stype": r["stype"], "sval": r["sval"], "opp": str(r["bn"] or "")[:24], "res": json.loads(r["result"])}}
+
+@api("/api/race/seen")
+def race_seen(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    try: rid = int(b["id"])
+    except (KeyError, TypeError, ValueError): raise HTTPException(400, "Неверные данные")
+    c.execute("UPDATE races SET aseen=1 WHERE id=? AND a=?", (rid, uid)); c.commit()
+    return {"ok": 1}
 
 @api("/api/race/cancel")
 def race_cancel(b):
