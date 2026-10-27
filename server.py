@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller 
 CREATE TABLE IF NOT EXISTS shop(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,price INT,ts INT,status TEXT DEFAULT 'open',buyer INT);
 CREATE TABLE IF NOT EXISTS car_tune(uid INT,cid TEXT,s INT DEFAULT 0,su INT DEFAULT 0,ti INT DEFAULT 0,li INT DEFAULT 0,ae INT DEFAULT 0,ni INT DEFAULT 0,PRIMARY KEY(uid,cid));
 CREATE INDEX IF NOT EXISTS ix_ctcid ON car_tune(cid);
+CREATE TABLE IF NOT EXISTS cosm(uid INT,k TEXT,ts INT,PRIMARY KEY(uid,k));
 CREATE TABLE IF NOT EXISTS races(id INTEGER PRIMARY KEY AUTOINCREMENT,a INT,acar TEXT,stype TEXT,sval INT,aitem TEXT,ts INT,status TEXT DEFAULT 'open',b INT,bcar TEXT,bitem TEXT,result TEXT,winner INT);
 CREATE TABLE IF NOT EXISTS upg_pend(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,pk TEXT,win INT,newm INT,ts INT,cnt INT DEFAULT 0);
 CREATE INDEX IF NOT EXISTS ix_upgp ON upg_pend(uid);
@@ -2010,6 +2011,23 @@ def _race_refund(c, r, why=""):   # вернуть ставку создател
     if r["stype"] == "bal": gift(c, r["a"], {"t": "bal", "v": r["sval"]})
     elif r["stype"] == "stars": wadd(c, r["a"], r["sval"], "race-refund")
     elif r["aitem"]: gift(c, r["a"], json.loads(r["aitem"]))
+
+COSM = {"chrome": 40, "gold": 60, "matte": 25, "pearl": 35, "candy": 45,      # премиум-краски
+        "fl_blue": 30, "fl_green": 30, "fl_pink": 30, "fl_white": 40, "fl_gold": 60}   # цвет пламени (звёзды)
+
+@api("/api/cosm/list")
+def cosm_list(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    return {"own": [x["k"] for x in c.execute("SELECT k FROM cosm WHERE uid=?", (uid,))], "price": COSM, "stars": stars_of(c, uid)}
+
+@api("/api/cosm/buy")
+def cosm_buy(b):
+    uid, _ = auth(b.get("initData")); c = db(); k = str(b.get("k") or "")
+    if k not in COSM: raise HTTPException(400, "Нет такого товара")
+    if c.execute("SELECT 1 FROM cosm WHERE uid=? AND k=?", (uid, k)).fetchone(): raise HTTPException(400, "Уже куплено")
+    wspend(c, uid, COSM[k], "cosm-" + k)
+    c.execute("INSERT OR IGNORE INTO cosm VALUES(?,?,?)", (uid, k, int(time.time()))); c.commit()
+    return {"ok": 1, "stars": stars_of(c, uid)}
 
 @api("/api/race/pending")
 def race_pending(b):   # принятый вызов, который создатель ещё не видел (уведомление внутри игры)
