@@ -72,6 +72,24 @@ async def paid(u: Update, ctx):  # оплата звёздами прошла - 
             except Exception: pass
         return
     if msg: await u.message.reply_text(msg)
+    try:   # уведомление админам: игрок заплатил звёздами
+        c = db(); tu = u.effective_user; row = c.execute("SELECT name FROM users WHERE id=?", (tu.id,)).fetchone()
+        nm = (row["name"] if row and row["name"] else tu.full_name) or str(tu.id)
+        tot = c.execute("SELECT COALESCE(SUM(stars),0) FROM payments WHERE charge NOT LIKE 'wallet:%'").fetchone()[0]
+        txt = "💫 Донат звёздами!\n%s%s · ID %s\nТовар: %s\nСумма: %s ⭐\nВсего получено: %s ⭐" % (nm, (" (@%s)" % tu.username) if tu.username else "", tu.id, d.get("i"), pay.total_amount, tot)
+        for a in ADMINS:
+            try: await ctx.bot.send_message(a, txt)
+            except Exception as e: import logging; logging.getLogger("uzn").error("уведомление о донате не доставлено админу %s: %r", a, e)
+    except Exception as e:
+        import logging; logging.getLogger("uzn").error("ошибка уведомления о донате: %r", e)
+
+@admin
+async def notifytest(u, ctx):  # /notifytest - проверка: придёт ли уведомление о донате всем админам
+    ok = []; bad = []
+    for a in ADMINS:
+        try: await ctx.bot.send_message(a, "💫 Тест уведомления о донате: если вы это видите, то при оплате звёздами придёт такое же сообщение."); ok.append(a)
+        except Exception as e: bad.append("%s (%s)" % (a, e))
+    await u.message.reply_text("Админы из настроек (ADMINS): %s\nДоставлено: %s\nНе доставлено: %s\nВаш ID: %s" % (", ".join(str(x) for x in ADMINS), ok or "никому", bad or "нет", u.effective_user.id))
 
 @admin
 async def stars(u, ctx):  # /stars - сколько звёзд получено
@@ -497,6 +515,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
