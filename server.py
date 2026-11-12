@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS shop(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,
 CREATE TABLE IF NOT EXISTS car_tune(uid INT,cid TEXT,s INT DEFAULT 0,su INT DEFAULT 0,ti INT DEFAULT 0,li INT DEFAULT 0,ae INT DEFAULT 0,ni INT DEFAULT 0,PRIMARY KEY(uid,cid));
 CREATE INDEX IF NOT EXISTS ix_ctcid ON car_tune(cid);
 CREATE TABLE IF NOT EXISTS cosm(uid INT,k TEXT,ts INT,PRIMARY KEY(uid,k));
+CREATE TABLE IF NOT EXISTS rstat(uid INT,sk TEXT,played INT DEFAULT 0,wins INT DEFAULT 0,PRIMARY KEY(uid,sk));
 CREATE TABLE IF NOT EXISTS races(id INTEGER PRIMARY KEY AUTOINCREMENT,a INT,acar TEXT,stype TEXT,sval INT,aitem TEXT,ts INT,status TEXT DEFAULT 'open',b INT,bcar TEXT,bitem TEXT,result TEXT,winner INT);
 CREATE TABLE IF NOT EXISTS upg_pend(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,pk TEXT,win INT,newm INT,ts INT,cnt INT DEFAULT 0);
 CREATE INDEX IF NOT EXISTS ix_upgp ON upg_pend(uid);
@@ -988,11 +989,19 @@ def _meta_get(c, k):
     r = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone(); return r[0] if r else None
 def _meta_set(c, k, v): c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (k, str(v))); c.commit()
 
-DAILY_TXT = ["🎁 Ежедневный подарок ждёт! Заходи и забери — серия растёт, награды больше.",
-             "🔥 Не прерывай серию! Забери сегодняшний подарок в UZ Номерок.",
-             "🎰 Бесплатная крутка и подарок дня ждут тебя. Заходи!",
-             "💎 Мифик и Секретные номера теперь NFT на TON. Заходи за подарком дня — вдруг выпадет редкий!",
-             "🚗 Сегодня твой день: забери подарок и попробуй выбить редкий номер!"]
+DAILY_TXT = ["🎁 Ежедневный подарок уже ждёт тебя! Серия растёт — награды больше.",
+             "🔥 Не прерывай серию! Сегодняшний подарок ещё не забран.",
+             "🎰 Бесплатная крутка и подарок дня на месте. Вдруг сегодня выпадет Мифик?",
+             "💎 Мифик и Секретные номера — это NFT на TON. Зайди за подарком, вдруг повезёт!",
+             "🚗 Гараж скучает! Забери подарок дня и сделай крутку.",
+             "👀 Пока тебя не было, игроки выбивают редкие номера. Твоя очередь!",
+             "🏁 Бросай вызов в гонках — ставки уже ждут. А подарок дня ещё не забран!",
+             "💰 Подарок дня — это сумы, крутки и бусты удачи. Заходи, пока не сгорел!",
+             "⚡ Один заход — и подарок твой. Всего 5 секунд!",
+             "🍀 Сегодня удача на твоей стороне? Проверь: подарок дня + бесплатная крутка.",
+             "🏆 Идёт сезон: гонки, задания и Battle Pass ждут. Заходи, забери подарок!",
+             "🔥 Серия входов даёт всё больше наград. Не теряй её, зайди сегодня!"]
+DAILY_BTN = ["🎁 Забрать подарок", "🎰 Крутить номер", "🔥 Продолжить серию", "🏁 В игру", "💰 Забрать награду"]
 def daily_reminders(c):
     """Раз в день каждому игроку, который сегодня ещё не заходил: напоминание о подарке. Время у каждого своё (10-21 по Ташкенту)."""
     lt = time.gmtime(time.time() + TZ_OFF); day = int((time.time() + TZ_OFF) // 86400); hour = lt.tm_hour
@@ -1001,7 +1010,7 @@ def daily_reminders(c):
     rows = c.execute("SELECT id FROM users WHERE COALESCE(mute,0)=0 AND COALESCE(rem,0)<? AND last_seen>=? AND last_seen<? AND (10 + ((id*31 + ?)%12))<=? LIMIT 400",
                      (day, t0 - 30 * 86400, t0, day * 17, hour)).fetchall()
     for r in rows:
-        c.execute("UPDATE users SET rem=? WHERE id=?", (day, r[0])); notify(r[0], DAILY_TXT[(day + r[0]) % len(DAILY_TXT)], "🎁 Забрать подарок"); n += 1
+        c.execute("UPDATE users SET rem=? WHERE id=?", (day, r[0])); notify(r[0], DAILY_TXT[(day + r[0]) % len(DAILY_TXT)], DAILY_BTN[(day * 3 + r[0]) % len(DAILY_BTN)]); n += 1
     c.commit(); return n
 
 WEEKEND_EVENT = {"luck": 1.5, "sell": 1.0, "xp": 2.0, "upg": 1.0}
@@ -1327,7 +1336,7 @@ def auc_bid(b):
     if a["topuid"]: gift(c, a["topuid"], {"t": "bal", "v": a["top"]})   # возврат прошлому лидеру
     c.commit(); _AUC[0] = 0
     if a["topuid"]:
-        notify(a["topuid"], "🔨 Вашу ставку перебили!\n%s\nНовая ставка: %s сум. Ваши %s сум уже вернулись на баланс.\nДо конца торгов: %s" % (
+        notify(a["topuid"], random.choice(["🔨 Вашу ставку перебили!\n%s\nНовая ставка: %s сум. Ваши %s сум уже вернулись на баланс.\nДо конца торгов: %s", "😮 Кто-то оказался быстрее!\n%s\nСтавка выросла до %s сум. Ваши %s сум вернулись. Ещё можно успеть — осталось %s", "⚔️ Лот уходит к другому!\n%s\nСейчас %s сум (ваши %s сум вернулись). Перебейте, пока не поздно: %s"]) % (
             item_txt(json.loads(a["item"])), fnum(price), fnum(a["top"]), left_txt(max(a["end"], now + 15) - now)), "🔨 Перебить ставку")
     return {"ok": 1, "price": price}
 
@@ -1430,6 +1439,107 @@ def ads_cfg(c):
 
 def ads_is_off(c):
     r = c.execute("SELECT v FROM meta WHERE k='ads_off'").fetchone(); return bool(r and r[0] == "1")
+
+# ---------------------------------------------------------------- итоги сезона и новый сезон
+SEASON_BAL = int(os.environ.get("SEASON_BAL", 50_000_000))   # сколько сумов у каждого игрока в начале нового сезона
+SEASON_MIN_WINS = 3     # чтобы попасть в топ по победам в гонках
+SEASON_MIN_LV = 3       # чтобы попасть в топ по уровню
+_M = 1_000_000
+# награды: m - сумы, s - звёзды, cs - косметика (ключ из COSM), bp - Battle Pass на новый сезон (1 Премиум, 2 Премиум+), bl - удача (минуты), fp/fc - бесплатные крутки номера/машины
+REW_WINS = [(1, 1, {"m": 150 * _M, "s": 200, "cs": ["gold", "chrome", "pearl", "candy", "matte", "fl_gold"]}),
+            (2, 2, {"m": 100 * _M, "s": 120, "cs": ["chrome", "pearl", "fl_white"]}),
+            (3, 3, {"m": 70 * _M, "s": 80, "cs": ["pearl", "fl_blue"]}), (4, 10, {"m": 30 * _M, "s": 30, "bl": 120})]
+REW_LVL = [(1, 1, {"m": 100 * _M, "s": 100, "cs": ["fl_gold", "fl_pink", "fl_green", "fl_blue", "fl_white"]}), (2, 2, {"m": 70 * _M, "s": 60, "cs": ["fl_pink", "fl_green"]}),
+           (3, 3, {"m": 50 * _M, "s": 40, "cs": "fl_green"}), (4, 10, {"m": 20 * _M, "bl": 120})]
+REW_PART = [(30, {"m": 40 * _M, "fp": 10, "fc": 2, "bl": 180, "cs": "fl_blue"}), (10, {"m": 15 * _M, "fp": 5, "fc": 1, "bl": 60}), (1, {"m": 5 * _M, "fp": 2})]
+
+def _meta(c, k, d=0):
+    r = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+    try: return int(r[0]) if r else d
+    except (TypeError, ValueError): return d
+
+def _rstat_upsert(c, uid, sk, win):
+    c.execute("INSERT INTO rstat(uid,sk,played,wins) VALUES(?,?,1,?) ON CONFLICT(uid,sk) DO UPDATE SET played=played+1,wins=wins+?", (uid, sk, 1 if win else 0, 1 if win else 0))
+
+def _rstat_backfill(c):   # один раз за сезон: заполняем статистику уже сыгранными заездами игроков (против бота раньше не записывались)
+    n = season_of(c)[0]; r = c.execute("SELECT v FROM meta WHERE k='rstat_bf'").fetchone()
+    if r and r[0] == n: return False
+    since = _meta(c, "season_start", 0)
+    for x in c.execute("SELECT a,b,winner FROM races WHERE status='done' AND ts>=?", (since,)).fetchall():
+        for u in (x["a"], x["b"]):
+            if u: _rstat_upsert(c, u, n, x["winner"] == u)
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rstat_bf',?)", (n,)); return True
+
+def rstat_add(c, uid, win):
+    try:
+        if _rstat_backfill(c): return   # текущий заезд уже в таблице races и посчитан при заполнении
+        _rstat_upsert(c, uid, season_of(c)[0], win)
+    except Exception: log.exception("rstat")
+
+def _merge(a, b):
+    for k, v in b.items():
+        if k == "cs": a.setdefault("cs", []).extend(v if isinstance(v, list) else [v])
+        elif k == "bp": a["bp"] = max(a.get("bp", 0), v)
+        else: a[k] = a.get(k, 0) + v
+
+def season_plan(c):
+    """Кто что получает за текущий сезон. Ничего не меняет в базе (кроме разового заполнения статистики)."""
+    n, _e = season_of(c); _rstat_backfill(c); since = _meta(c, "season_start", 0) or int(time.time()) - 14 * 86400
+    rs = {r["uid"]: (r["played"], r["wins"]) for r in c.execute("SELECT uid,played,wins FROM rstat WHERE sk=?", (n,))}
+    P = {}
+    for u in c.execute("SELECT id,name,last_seen,state FROM users WHERE state IS NOT NULL").fetchall():
+        try: st = json.loads(u["state"]) or {}
+        except Exception: st = {}
+        p, w = rs.get(u["id"], (0, 0))
+        P[u["id"]] = {"name": str(u["name"] or "Игрок")[:18], "p": p, "w": w, "lv": int(st.get("lv") or 1), "xp": int(st.get("xp") or 0), "pt": len(st.get("col") or []),
+                      "cr": len(st.get("cars") or []), "sp": int(st.get("sp") or 0), "hid": u["id"] in HIDDEN, "wr": 0, "lr": 0, "rew": {}, "act": p > 0 or (u["last_seen"] or 0) >= since}
+    wl = sorted([i for i, x in P.items() if not x["hid"] and x["w"] >= SEASON_MIN_WINS], key=lambda i: (-P[i]["w"], P[i]["p"]))
+    ll = sorted([i for i, x in P.items() if not x["hid"] and x["act"] and x["lv"] >= SEASON_MIN_LV], key=lambda i: (-P[i]["lv"], -P[i]["xp"]))
+    for lst, tbl, key in ((wl, REW_WINS, "wr"), (ll, REW_LVL, "lr")):
+        for pos, i in enumerate(lst, 1):
+            for lo, hi, r in tbl:
+                if lo <= pos <= hi: P[i][key] = pos; _merge(P[i]["rew"], r); break
+    for i, x in P.items():
+        if x["hid"]: continue
+        for need, r in REW_PART:
+            if x["p"] >= need: _merge(x["rew"], r); break
+    return n, P
+
+def rew_text(r):
+    o = []
+    if r.get("m"): o.append("%s сум" % fnum(r["m"]))
+    if r.get("s"): o.append("%d ⭐" % r["s"])
+    if r.get("fp"): o.append("%d круток номера" % r["fp"])
+    if r.get("fc"): o.append("%d круток машины" % r["fc"])
+    if r.get("bl"): o.append("удача ×2 на %s" % ("%d ч" % (r["bl"] // 60) if r["bl"] % 60 == 0 else "%d мин" % r["bl"]))
+    for k in r.get("cs", []): o.append("🎨 " + COSM_NAME.get(k, k))
+    if r.get("bp"): o.append("Battle Pass %s на новый сезон" % ("Премиум+" if r["bp"] == 2 else "Премиум"))
+    return o
+
+COSM_NAME = {"chrome": "краска Хром", "gold": "краска Золото", "matte": "краска Мат", "pearl": "краска Перламутр", "candy": "краска Кэнди",
+             "fl_blue": "синее пламя", "fl_green": "зелёное пламя", "fl_pink": "розовое пламя", "fl_white": "белое пламя", "fl_gold": "золотое пламя"}
+
+def season_apply(c, P, old, new, days):
+    """Новый сезон: у всех сумы = SEASON_BAL (номера и машины остаются), награды за итоги, статистика сезона обнуляется (по новому названию)."""
+    now = int(time.time())
+    for uid, x in P.items():
+        r = x["rew"]
+        gift(c, uid, {"t": "setbal", "v": SEASON_BAL})
+        if r.get("m"): gift(c, uid, {"t": "bal", "v": r["m"]})
+        if r.get("bl"): gift(c, uid, {"t": "boost", "k": "bl", "v": r["bl"]})
+        if r.get("fp"): gift(c, uid, {"t": "fp", "v": r["fp"]})
+        if r.get("fc"): gift(c, uid, {"t": "fc", "v": r["fc"]})
+        if r.get("s"): wadd(c, uid, r["s"], "season-reward")
+        for k in r.get("cs", []): c.execute("INSERT OR IGNORE INTO cosm VALUES(?,?,?)", (uid, k, now))
+        if r.get("bp"): c.execute("INSERT OR REPLACE INTO bp(uid,sk,tier) VALUES(?,?,?)", (uid, new, r["bp"]))
+        if x["act"] and not x["hid"]:
+            gift(c, uid, {"t": "recap", "v": {"n": old, "nx": new, "p": x["p"], "w": x["w"], "wr": x["wr"], "lv": x["lv"], "lr": x["lr"], "pt": x["pt"], "cr": x["cr"], "sp": x["sp"], "rw": rew_text(r), "bal": SEASON_BAL}})
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_name',?)", (new,)); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_end',?)", (str(now + days * 86400),))
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_start',?)", (str(now),)); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rstat_bf',?)", (new,)); c.commit()
+    for uid, x in P.items():   # личные сообщения тем, кто в призах
+        if x["hid"] or not (x["wr"] or x["lr"] or x["p"] >= 10): continue
+        notify(uid, "🏁 Итоги сезона %s\n%s\nНаграды: %s\n\nНовый сезон %s начался: у всех %s сум, номера и машины остались. Заходи за наградой!" % (
+            old, "Гонок: %d, побед: %d%s%s" % (x["p"], x["w"], (", место по победам: %d" % x["wr"]) if x["wr"] else "", (", место по уровню: %d" % x["lr"]) if x["lr"] else ""), ", ".join(rew_text(x["rew"])) or "—", new, fnum(SEASON_BAL)))
 
 @api("/api/bp/buy")
 def bp_buy(b):
@@ -2000,7 +2110,8 @@ def race_accept(b):
     res = {"a": {"n": ac["n"], "pl": ac["pl"], "st": sa, "t": round(tA, 2), "name": ""}, "b": {"n": xb.get("n"), "pl": xb.get("pl"), "st": sb, "t": round(tB, 2), "name": str(uname)[:24]},
            "pay": pay, "chance_a": round(chance_a * 100), "aitem": json.loads(r["aitem"]) if r["aitem"] else None, "bitem": bitem}
     an = c.execute("SELECT name FROM users WHERE id=?", (r["a"],)).fetchone(); res["a"]["name"] = str((an["name"] if an else "") or "")[:24]
-    c.execute("UPDATE races SET bcar=?,bitem=?,result=?,winner=? WHERE id=?", (json.dumps({"n": xb.get("n"), "t": xb.get("t"), "id": xb.get("id")}), json.dumps(bitem) if bitem else None, json.dumps(res), winner, rid)); c.commit()
+    c.execute("UPDATE races SET bcar=?,bitem=?,result=?,winner=? WHERE id=?", (json.dumps({"n": xb.get("n"), "t": xb.get("t"), "id": xb.get("id")}), json.dumps(bitem) if bitem else None, json.dumps(res), winner, rid))
+    rstat_add(c, winner, True); rstat_add(c, loser, False); c.commit()
     stk = ("%s сум" % fnum(r["sval"])) if r["stype"] == "bal" else (("%d ⭐" % r["sval"]) if r["stype"] == "stars" else "предмет")
     notify(r["a"], "🏁 Ваш заезд принят!\n%s против %s (%s)\nСтавка: %s\n%s" % (ac["n"], xb.get("n"), str(uname)[:30] or ("ID %d" % uid), stk,
         "🏆 Вы победили! Награда уже у вас." if a_wins else "💥 Вы проиграли."), "🏁 Открыть игру")
@@ -2028,6 +2139,20 @@ def cosm_buy(b):
     wspend(c, uid, COSM[k], "cosm-" + k)
     c.execute("INSERT OR IGNORE INTO cosm VALUES(?,?,?)", (uid, k, int(time.time()))); c.commit()
     return {"ok": 1, "stars": stars_of(c, uid)}
+
+BPC = {"bp_neon": (1, 15), "bp_fire": (1, 35), "bp_ice": (2, 10), "bp_royal": (2, 25)}   # эксклюзив Battle Pass: (тариф, уровень)
+
+@api("/api/bp/cosm")
+def bp_cosm(b):
+    uid, _ = auth(b.get("initData")); c = db(); k = str(b.get("k") or "")
+    if k not in BPC: raise HTTPException(400, "Нет такой награды")
+    need, lvl = BPC[k]
+    if bp_tier(c, uid) < need: raise HTTPException(400, "Нужен Battle Pass " + ("Премиум" if need == 1 else "Премиум+"))
+    try: st = _ustate(c, uid) or {}
+    except Exception: st = {}
+    if int(st.get("bpx") or 0) // 60 < lvl: raise HTTPException(400, "Уровень ещё не достигнут")
+    c.execute("INSERT OR IGNORE INTO cosm VALUES(?,?,?)", (uid, k, int(time.time()))); c.commit()
+    return {"ok": 1}
 
 @api("/api/race/pending")
 def race_pending(b):   # принятый вызов, который создатель ещё не видел (уведомление внутри игры)
@@ -2117,7 +2242,7 @@ def race_bot_go(b):
         pay = int(stake * off["mult"])
         if typ == "bal": gift(c, uid, {"t": "bal", "v": pay})
         else: wadd(c, uid, pay, "race-bot-win")
-    c.commit()
+    rstat_add(c, uid, win); c.commit()
     res = {"a": {"n": x.get("n"), "pl": x.get("pl"), "st": cs, "t": round(tA, 2), "name": str(uname)[:24]}, "b": {"n": off["bot"]["n"], "pl": None, "st": off["bot"]["st"], "t": round(tB, 2), "name": off["bot"]["name"]},
            "pay": pay, "stake": stake, "stype": typ, "bot": 1}
     return {"ok": 1, "win": win, "res": res, "stars": stars_of(c, uid)}
@@ -2126,10 +2251,21 @@ def race_bot_go(b):
 EXC = [("Rolls-Royce Spectre", 3.5), ("Lamborghini Aventador SVJ", 3.2), ("Ferrari 812 Superfast", 3), ("Bugatti Veyron", 4),
        ("Porsche Carrera GT", 3.8), ("McLaren P1", 4.5), ("Lamborghini Revuelto", 4)]
 ULTRA = [("Mercedes G63 «Аюб»", {"k": 1, "r": "01", "d": "007", "z": "AUB"}), ("Zeekr 009 «Бибиша»", {"k": 0, "r": "01", "a": "A", "d": "777", "z": "AC"})]
-SYSLOT_EVERY = 1800   # новый эксклюзивный лот не чаще раза в 30 минут (торги идут 10 минут)
+SYSLOT_EVERY = 6 * 3600   # новый эксклюзивный лот не чаще раза в 6 часов (торги идут 10 минут)
 
-def _push_syslot(c, item, now):
-    try: push_users(c, "last_seen>?", (now - 7 * 86400,), "🔨 Эксклюзивный аукцион! %s %s — торги идут 10 минут. Заходи, пока не ушёл!" % (item["v"]["e"], item["v"]["n"]))
+SYSLOT_TXT = ["🔨 Эксклюзив на аукционе: {e} {n}!\nСтарт {p} сум. Торги идут 10 минут — успей перехватить!",
+              "🏎 В игре появилась редкая машина — {n}. Такую нельзя выбить в рулетке!\nСтавки от {p} сум, осталось 10 минут.",
+              "⚡ Срочно! {e} {n} выставлен на аукцион.\nСтарт {p} сум. Кто успеет — тот и заберёт.",
+              "👑 Редкий лот: {n}.\nТолько здесь и только 10 минут. Стартовая ставка — {p} сум.",
+              "🔥 Аукцион открыт! {e} {n} ждёт нового хозяина.\nНачало торгов: {p} сум. Заходи первым!",
+              "💥 Шанс, который бывает нечасто: {n} на аукционе.\nЗа 10 минут решится, кто станет владельцем."]
+SYSLOT_BTN = ["🔨 Сделать ставку", "🏎 Забрать машину", "⚡ На аукцион", "👑 Участвовать"]
+
+def _push_syslot(c, item, now, start=0):
+    try:
+        k = random.randrange(len(SYSLOT_TXT))
+        txt = SYSLOT_TXT[k].format(e=item["v"]["e"], n=item["v"]["n"], p=fnum(start))
+        push_users(c, "last_seen>?", (now - 3 * 86400,), txt, SYSLOT_BTN[random.randrange(len(SYSLOT_BTN))])
     except Exception: log.exception("push syslot")
 
 def system_lot(c):
@@ -2141,7 +2277,7 @@ def system_lot(c):
     item = {"t": "car", "v": {"n": n, "e": "🏎️", "t": 3, "m": m, "pl": None}}; start = int(30000000 * m * 0.5 / 1000) * 1000
     c.execute("INSERT INTO auctions(seller,item,start,end) VALUES(0,?,?,?)", (json.dumps(item, ensure_ascii=False), start, now + 600))
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('syslot',?)", (str(now),)); c.commit(); _AUC[0] = 0
-    _push_syslot(c, item, now)
+    _push_syslot(c, item, now, start)
 
 def launch_ultra(c, idx):
     """Команда админа: запустить супер-лот (1 - Аюб, 2 - Бибиша). Возвращает текст-ответ."""
@@ -2152,7 +2288,7 @@ def launch_ultra(c, idx):
     item = {"t": "car", "v": {"n": n, "e": "🚙", "t": 4, "m": 2, "pl": pl}}
     c.execute("INSERT INTO auctions(seller,item,start,end) VALUES(0,?,?,?)", (json.dumps(item, ensure_ascii=False), 600_000_000, now + 600))
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('syslot',?)", (str(now),)); c.commit(); _AUC[0] = 0
-    _push_syslot(c, item, now)
+    _push_syslot(c, item, now, 600_000_000)
     return "✅ Аукцион запущен: %s, старт 600 000 000 сум, 10 минут. Всем игрокам ушло уведомление." % n
 
 # ---------------------------------------------------------------- уход за базой: чистка, копии, проверка, отчёт

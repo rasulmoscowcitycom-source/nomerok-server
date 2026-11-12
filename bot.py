@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, apply_payment, plate_txt, ukey, clean_plate
+from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -151,13 +151,17 @@ def parse_gift(a):  # a = слова после ID игрока
         nm = " ".join(a[5:])
         return {"t": "car", "v": {"n": nm, "e": "🚙", "t": 3, "m": .8 if "9X" in nm else 1,
                 "pl": {"k": 0, "r": a[1], "a": a[2].upper(), "d": a[3], "z": a[4].upper()}}}
-    if kind == "boost": return {"t": "boost", "k": {"luck": "bl", "sell": "bs", "xp": "bx"}[a[1]], "v": int(a[2])}
+    if kind == "boost":
+        g = {"t": "boost", "k": {"luck": "bl", "sell": "bs", "xp": "bx"}[a[1]], "v": int(a[2])}
+        if len(a) > 3 and a[1] == "luck":   # множитель удачи: /give ID boost luck 120 5
+            g["x"] = max(2, min(50, int(a[3])))
+        return g
     raise ValueError
 
 GIVE_HELP = ("Выдача: /give ID что-то (вместо ID можно all - всем игрокам)\n"
              "/give ID noads (отключить рекламу навсегда)\n/give ID bal 1000000\n/give ID plate 01 A 777 AC\n/give ID firm 01 007 AUB\n"
              "/give ID car 3 Название машины (0-4: обычная...секретная)\n/give ID carplate 01 R 700 TT Zeekr 9X\n"
-             "/give ID boost luck 120 (luck/sell/xp, минуты)\n\nНайти ID: /find имя, /players")
+             "/give ID boost luck 120 (luck/sell/xp, минуты)\n/give ID boost luck 120 10 (удача ×10 на 120 минут, множитель 2-50)\n\nНайти ID: /find имя, /players")
 
 @admin
 async def give(u, ctx):
@@ -504,6 +508,31 @@ async def adsint(u, ctx):  # /adsint 60 или /adsint 60 10 (секунды м�
     i, f = ads_cfg(c)
     await u.message.reply_text("Реклама: раз в %d сек, до %d штук подряд, потом пауза ~6 минут.\nИзменить: /adsint секунды штук\nНапример /adsint 60 10\nДействует у игроков при следующем заходе в игру." % (i, f))
 
+@admin
+async def newseason(u, ctx):   # /newseason Beta 3 14 - показать итоги и план; /newseason Beta 3 14 CONFIRM - начать новый сезон
+    a = list(ctx.args); conf = bool(a) and a[-1] == "CONFIRM"
+    if conf: a = a[:-1]
+    if len(a) < 2 or not a[-1].isdigit():
+        return await u.message.reply_text("Новый сезон: /newseason Название ДНИ\nНапример: /newseason Beta 3 14\nБот покажет итоги и что получит каждый. Начать: добавьте CONFIRM в конце.\n\n"
+                                          "Что произойдёт: у ВСЕХ сумы станут %s (номера и машины остаются), топ по победам в гонках, топ по уровню и все, кто играл, получат награды, Battle Pass начнётся заново." % f"{SEASON_BAL:,}".replace(",", " "))
+    days = max(1, min(120, int(a[-1]))); name = " ".join(a[:-1])[:24]
+    c = db(); old, P = season_plan(c)
+    tw = sorted([i for i in P if P[i]["wr"]], key=lambda i: P[i]["wr"])[:10]; tl = sorted([i for i in P if P[i]["lr"]], key=lambda i: P[i]["lr"])[:10]
+    act = sum(1 for x in P.values() if x["act"]); part = sum(1 for x in P.values() if x["rew"] and not x["wr"] and not x["lr"])
+    tot_m = sum(x["rew"].get("m", 0) for x in P.values()); tot_s = sum(x["rew"].get("s", 0) for x in P.values())
+    txt = "Сезон «%s» → «%s» на %d дн.\nИгроков: %d, играли в сезоне: %d\n\n🏁 Топ по победам в гонках:\n%s\n\n📈 Топ по уровню:\n%s\n\nЗа участие наград: %d игрокам\nВсего сумов призами: %s, звёзд: %d ⭐\nСумы после сброса: %s у каждого" % (
+        old, name, days, len(P), act,
+        "\n".join("%d. %s — %d побед из %d" % (P[i]["wr"], P[i]["name"], P[i]["w"], P[i]["p"]) for i in tw) or "— пока никто не набрал %d побед" % SEASON_MIN_WINS,
+        "\n".join("%d. %s — уровень %d" % (P[i]["lr"], P[i]["name"], P[i]["lv"]) for i in tl) or "—",
+        part, f"{tot_m:,}".replace(",", " "), tot_s, f"{SEASON_BAL:,}".replace(",", " "))
+    if not conf:
+        return await u.message.reply_text(txt + "\n\nЭто только план, ничего не изменено.\nНачать сезон: /newseason %s %d CONFIRM" % (name, days))
+    try: bk = backup_db("newseason")
+    except Exception as e: return await u.message.reply_text(f"❌ Не удалось сделать копию базы ({e}). Новый сезон не начат.")
+    season_apply(c, P, old, name, days)
+    await u.message.reply_text("✅ Сезон «%s» начался на %d дн.\n\n%s\n\nИгроки получат сумы и награды при заходе в игру (до 45 сек). Лучшим игрокам бот отправил личные сообщения.\nКопия базы сохранена: /backup\n\nОбъявите игрокам: /broadcast 🏁 Начался сезон %s! У всех %s сум, номера и машины остались. Новый Battle Pass, задания и награды ждут вас!" % (
+        name, days, txt, name, f"{SEASON_BAL:,}".replace(",", " ")))
+
 async def mute(u, ctx):  # /mute - отключить рассылки игры
     c = db(); c.execute("UPDATE users SET mute=1 WHERE id=?", (u.effective_user.id,)); c.commit(); await u.message.reply_text("🔕 Уведомления выключены. Включить: /unmute")
 
@@ -515,6 +544,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
