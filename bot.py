@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL
+from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -509,6 +509,25 @@ async def adsint(u, ctx):  # /adsint 60 или /adsint 60 10 (секунды м�
     await u.message.reply_text("Реклама: раз в %d сек, до %d штук подряд, потом пауза ~6 минут.\nИзменить: /adsint секунды штук\nНапример /adsint 60 10\nДействует у игроков при следующем заходе в игру." % (i, f))
 
 @admin
+async def income(u, ctx):   # /income - показать; /income on|off; /income rate ТИР СУМ; /income car ТИП МНОЖ; /income cap ЧАСЫ
+    c = db(); cf = income_cfg(c); a = [x.lower() for x in ctx.args]; err = ""
+    try:
+        if a and a[0] in ("on", "off"): cf["on"] = 1 if a[0] == "on" else 0
+        elif a and a[0] == "rate": i = int(a[1]); assert 0 <= i <= 5; cf["r"][i] = int(a[2].replace("_", "")); assert 0 <= cf["r"][i] <= 10**9
+        elif a and a[0] == "car": i = int(a[1]); assert 0 <= i <= 4; cf["c"][i] = float(a[2].replace(",", ".")); assert 0.1 <= cf["c"][i] <= 100
+        elif a and a[0] == "cap": cf["cap"] = int(a[1]); assert 1 <= cf["cap"] <= 72
+        elif a and a[0] == "reset": cf = income_cfg.__globals__["INC_DEF"].copy(); cf = json.loads(json.dumps(cf))
+        elif a: err = "Не понял команду.\n\n"
+        if a and not err: income_save(c, cf)
+    except Exception: err = "Неверные числа.\n\n"
+    NMS = ["Обычный", "Редкий", "Эпик", "Легендарный", "Мифик", "Секретный"]; CNS = ["Обычная", "Редкая", "Мифическая", "Легендарная", "Секретная"]
+    txt = err + "💰 Пассивный доход: %s\nНомер на машине приносит сум в минуту (копится до %d ч, игрок забирает в гараже).\n\nПо редкости номера (сум/мин):\n" % ("ВКЛЮЧЁН" if cf["on"] else "ВЫКЛЮЧЕН", cf["cap"])
+    txt += "\n".join("%d · %s: %s" % (i, NMS[i], "{:,}".format(cf["r"][i]).replace(",", " ")) for i in range(6))
+    txt += "\n\nМножитель по машине:\n" + "\n".join("%d · %s: ×%s" % (i, CNS[i], cf["c"][i]) for i in range(5))
+    txt += "\n\n/income on | off\n/income rate 4 80000 (номер Мифик = 80 000 в минуту)\n/income car 4 3 (Секретная машина ×3)\n/income cap 8 (часов копится)\n/income reset (вернуть стандарт)\nДействует у игроков в течение минуты."
+    await u.message.reply_text(txt)
+
+@admin
 async def newseason(u, ctx):   # /newseason Beta 3 14 - показать итоги и план; /newseason Beta 3 14 CONFIRM - начать новый сезон
     a = list(ctx.args); conf = bool(a) and a[-1] == "CONFIRM"
     if conf: a = a[:-1]
@@ -544,6 +563,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()

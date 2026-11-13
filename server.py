@@ -1429,7 +1429,23 @@ def season_info(c, uid):
     n, end = season_of(c); it = deal_item()
     used = c.execute("SELECT 1 FROM deal_used WHERE uid=? AND day=?", (uid, deal_day())).fetchone() is not None
     return {"n": n, "end": end, "bp": bp_tier(c, uid), "bpp": BP_PRICE, "deal": {"i": it, "pct": DEAL_PCT, "p": deal_price(it), "b": base_price(it), "used": used},
-            "ads": 0 if ads_is_off(c) else 1, "ai": ads_cfg(c)}
+            "ads": 0 if ads_is_off(c) else 1, "ai": ads_cfg(c), "inc": income_cfg(c)}
+
+# ---------------------------------------------------------------- пассивный доход: номер на машине приносит сумы в минуту
+INC_DEF = {"on": 1, "r": [50000, 100000, 200000, 800000, 1500000, 3000000], "c": [1, 1.3, 1.7, 2, 3], "cap": 8}   # сум/мин по редкости номера; множитель по редкости машины; копится максимум cap часов
+
+def income_cfg(c):
+    r = c.execute("SELECT v FROM meta WHERE k='inc_cfg'").fetchone(); cf = json.loads(json.dumps(INC_DEF))
+    try:
+        j = json.loads(r[0]); cf["on"] = 1 if j.get("on", 1) else 0
+        if len(j.get("r", [])) == 6: cf["r"] = [max(0, min(10**9, int(x))) for x in j["r"]]
+        if len(j.get("c", [])) == 5: cf["c"] = [max(0.1, min(100, float(x))) for x in j["c"]]
+        cf["cap"] = max(1, min(72, int(j.get("cap", cf["cap"]))))
+    except Exception: pass
+    return cf
+
+def income_save(c, cf):
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('inc_cfg',?)", (json.dumps(cf),)); c.commit()
 
 def ads_cfg(c):
     r = c.execute("SELECT v FROM meta WHERE k='ads_cfg'").fetchone()
