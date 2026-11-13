@@ -537,12 +537,15 @@ async def newseason(u, ctx):   # /newseason Beta 3 14 - показать ито�
     days = max(1, min(120, int(a[-1]))); name = " ".join(a[:-1])[:24]
     c = db(); old, P = season_plan(c)
     tw = sorted([i for i in P if P[i]["wr"]], key=lambda i: P[i]["wr"])[:10]; tl = sorted([i for i in P if P[i]["lr"]], key=lambda i: P[i]["lr"])[:10]
-    act = sum(1 for x in P.values() if x["act"]); part = sum(1 for x in P.values() if x["rew"] and not x["wr"] and not x["lr"])
+    ts_ = sorted([i for i in P if P[i]["sr"]], key=lambda i: P[i]["sr"])[:10]; tt_ = sorted([i for i in P if P[i]["tr"]], key=lambda i: P[i]["tr"])[:10]
+    act = sum(1 for x in P.values() if x["act"]); part = sum(1 for x in P.values() if x["rew"] and not x["wr"] and not x["lr"] and not x["sr"] and not x["tr"])
     tot_m = sum(x["rew"].get("m", 0) for x in P.values()); tot_s = sum(x["rew"].get("s", 0) for x in P.values())
-    txt = "Сезон «%s» → «%s» на %d дн.\nИгроков: %d, играли в сезоне: %d\n\n🏁 Топ по победам в гонках:\n%s\n\n📈 Топ по уровню:\n%s\n\nЗа участие наград: %d игрокам\nВсего сумов призами: %s, звёзд: %d ⭐\nСумы после сброса: %s у каждого" % (
+    txt = "Сезон «%s» → «%s» на %d дн.\nИгроков: %d, играли в сезоне: %d\n\n🏁 Топ по победам в гонках:\n%s\n\n📈 Топ по уровню:\n%s\n\n💸 Топ по тратам сумов:\n%s\n\n⭐ Топ по трате звёзд:\n%s\n\nЗа участие наград: %d игрокам\nВсего сумов призами: %s, звёзд: %d ⭐\nСумы после сброса: %s у каждого" % (
         old, name, days, len(P), act,
         "\n".join("%d. %s — %d побед из %d" % (P[i]["wr"], P[i]["name"], P[i]["w"], P[i]["p"]) for i in tw) or "— пока никто не набрал %d побед" % SEASON_MIN_WINS,
         "\n".join("%d. %s — уровень %d" % (P[i]["lr"], P[i]["name"], P[i]["lv"]) for i in tl) or "—",
+        "\n".join("%d. %s — %s сум" % (P[i]["sr"], P[i]["name"], f"{P[i]['sps']:,}".replace(",", " ")) for i in ts_) or "—",
+        "\n".join("%d. %s — %d ⭐" % (P[i]["tr"], P[i]["name"], P[i]["stp"]) for i in tt_) or "—",
         part, f"{tot_m:,}".replace(",", " "), tot_s, f"{SEASON_BAL:,}".replace(",", " "))
     if not conf:
         return await u.message.reply_text(txt + "\n\nЭто только план, ничего не изменено.\nНачать сезон: /newseason %s %d CONFIRM" % (name, days))

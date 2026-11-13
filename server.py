@@ -514,7 +514,7 @@ def top(b):
         hid = sorted(HIDDEN); q = ",".join("?" * len(hid))
         rows = c.execute("SELECT id,name,bal FROM users WHERE bal>0 " + ("AND id NOT IN (%s) " % q if hid else "") + "ORDER BY bal DESC LIMIT 10", hid).fetchall()
         _TOP["list"] = [{"id": r["id"], "name": (r["name"] or "Игрок")[:18], "bal": r["bal"]} for r in rows]; _TOP["ts"] = now
-    out = [{"n": i + 1, "name": x["name"], "bal": x["bal"], "me": x["id"] == uid} for i, x in enumerate(_TOP["list"])]
+    out = [{"n": i + 1, "id": x["id"], "name": x["name"], "bal": x["bal"], "me": x["id"] == uid} for i, x in enumerate(_TOP["list"])]
     me = None
     if uid not in HIDDEN:
         r = c.execute("SELECT bal FROM users WHERE id=?", (uid,)).fetchone(); mb = (r["bal"] if r else 0) or 0
@@ -522,6 +522,33 @@ def top(b):
         rk = c.execute("SELECT COUNT(*) FROM users WHERE bal>?" + (" AND id NOT IN (%s)" % q if hid else ""), [mb] + hid).fetchone()[0] + 1
         me = {"rank": rk, "bal": mb}
     return {"list": out, "me": me}
+
+@api("/api/profile")
+def player_profile(b):
+    """Публичный профиль игрока: лучшая машина с номером, уровень, оборот, донат ⭐, гонки."""
+    me, _ = auth(b.get("initData")); c = db()
+    try: pid = int(b.get("id", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверный ID")
+    u = c.execute("SELECT id,name,bal,state FROM users WHERE id=?", (pid,)).fetchone()
+    if not u or (pid in HIDDEN and pid != me): raise HTTPException(404, "Игрок с таким ID не найден")
+    try: st = json.loads(u["state"]) if u["state"] else {}
+    except Exception: st = {}
+    cars = [x for x in (st.get("cars") or []) if isinstance(x, dict)]; col = [p for p in (st.get("col") or []) if isinstance(p, dict)]
+    def ct(x):
+        try: return (int(x.get("t") or 0), tier_py(x["pl"]) if isinstance(x.get("pl"), dict) else -1)
+        except Exception: return (0, -1)
+    best = max(cars, key=ct) if cars else None
+    def pt(p):
+        try: return (tier_py(p), int(p.get("m") or 1))
+        except Exception: return (0, 1)
+    bp = max(col, key=pt) if col else None
+    pay = c.execute("SELECT COALESCE(SUM(stars),0) FROM payments WHERE uid=?", (pid,)).fetchone()[0] or 0
+    ton = c.execute("SELECT COALESCE(SUM(d),0) FROM wlog WHERE uid=? AND why='ton'", (pid,)).fetchone()[0] or 0
+    rs = c.execute("SELECT COALESCE(SUM(played),0),COALESCE(SUM(wins),0) FROM rstat WHERE uid=?", (pid,)).fetchone()
+    cv = None
+    if best: cv = {"n": str(best.get("n") or "")[:60], "t": int(best.get("t") or 0), "m": best.get("m") or 1, "pl": best.get("pl") if isinstance(best.get("pl"), dict) else None}
+    return {"id": pid, "name": (u["name"] or "Игрок")[:24], "lv": int(st.get("lv") or 1), "bal": int(u["bal"] or 0), "spt": int(st.get("spt") or 0),
+            "stars": int(pay) + int(ton), "plates": len(col), "cars": len(cars), "car": cv, "plate": bp, "played": int(rs[0]), "wins": int(rs[1]), "me": pid == me}
 
 def wallet_of(c, uid):
     r = c.execute("SELECT COALESCE(stars,0) FROM users WHERE id=?", (uid,)).fetchone()
@@ -1034,6 +1061,27 @@ def drop_alert(c, uid, p):
     t = tier_py(p); txt = "🔥 Игрок %s (ID %d) выбил %s номер %s! Заходи и ты — твой шанс тоже рядом." % (((u["name"] if u else "") or "Игрок"), uid, "СЕКРЕТНЫЙ" if t >= 5 else "МИФИЧЕСКИЙ", nft_title(p))
     push_users(c, "last_seen>? AND id!=?", (now - 3 * 86400, uid), txt)
 
+@api("/api/send_car")
+def send_car(b):
+    """Передать машину (вместе с номером на ней и тюнингом) другому игроку по ID."""
+    uid, _ = auth(b.get("initData")); c = db(); car = b.get("car")
+    try: to = int(b.get("to", 0))
+    except (TypeError, ValueError): raise HTTPException(400, "Неверный ID")
+    if to == uid or not c.execute("SELECT 1 FROM users WHERE id=?", (to,)).fetchone(): raise HTTPException(400, "Игрок с таким ID не найден")
+    if not isinstance(car, dict): raise HTTPException(400, "Выберите машину")
+    if c.execute("SELECT COUNT(*) FROM tlog WHERE uid=? AND why='send' AND ts>?", (uid, int(time.time()) - 86400)).fetchone()[0] >= 20: raise HTTPException(400, "Не больше 20 передач в сутки")
+    st = _ustate(c, uid)
+    cc = {"n": str(car.get("n") or "")[:60], "t": int(car.get("t") or 0), "m": car.get("m") or 1, "pl": car.get("pl"), "id": str(car.get("id") or "")[:20] or None}
+    x = _find_car(st, cc)
+    if not x: raise HTTPException(400, "Этой машины нет в вашем гараже (обновите игру)")
+    st["cars"] = [y for y in st["cars"] if y is not x]; _usave(c, uid, st)
+    c.execute("INSERT INTO tlog(uid,d,why,ts) VALUES(?,0,'send',?)", (uid, int(time.time())))
+    v = json.loads(json.dumps(x)); v.pop("tn", None)
+    gift(c, to, {"t": "car", "v": v}); c.commit()
+    me = c.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+    notify(to, "🎁 Игрок %s (ID %d) передал вам машину %s%s! Она уже в гараже." % (((me["name"] if me else "") or "Игрок"), uid, v.get("n", ""), " с номером " + nft_title(v["pl"]) if isinstance(v.get("pl"), dict) else ""))
+    return {"ok": 1}
+
 @api("/api/send")
 def send_plate(b):
     """Передать номер другому игроку по ID (Мифик/Секретные: принадлежность проверяет сервер; остальные уходят подарком)."""
@@ -1462,11 +1510,15 @@ SEASON_MIN_WINS = 3     # чтобы попасть в топ по победа�
 SEASON_MIN_LV = 3       # чтобы попасть в топ по уровню
 _M = 1_000_000
 # награды: m - сумы, s - звёзды, cs - косметика (ключ из COSM), bp - Battle Pass на новый сезон (1 Премиум, 2 Премиум+), bl - удача (минуты), fp/fc - бесплатные крутки номера/машины
-REW_WINS = [(1, 1, {"m": 150 * _M, "s": 200, "cs": ["gold", "chrome", "pearl", "candy", "matte", "fl_gold"]}),
+REW_WINS = [(1, 1, {"m": 150 * _M, "s": 200, "lk": (1.3, 1440), "cs": ["gold", "chrome", "pearl", "candy", "matte", "fl_gold"]}),
             (2, 2, {"m": 100 * _M, "s": 120, "cs": ["chrome", "pearl", "fl_white"]}),
             (3, 3, {"m": 70 * _M, "s": 80, "cs": ["pearl", "fl_blue"]}), (4, 10, {"m": 30 * _M, "s": 30, "bl": 120})]
 REW_LVL = [(1, 1, {"m": 100 * _M, "s": 100, "cs": ["fl_gold", "fl_pink", "fl_green", "fl_blue", "fl_white"]}), (2, 2, {"m": 70 * _M, "s": 60, "cs": ["fl_pink", "fl_green"]}),
            (3, 3, {"m": 50 * _M, "s": 40, "cs": "fl_green"}), (4, 10, {"m": 20 * _M, "bl": 120})]
+SEASON_MIN_SPEND = 50 * _M    # чтобы попасть в топ по тратам сумов
+SEASON_MIN_STARS = 20         # чтобы попасть в топ по трате ⭐
+REW_SPEND = [(1, 1, {"m": 80 * _M, "s": 60, "cs": ["candy", "matte"]}), (2, 3, {"m": 40 * _M, "s": 30}), (4, 10, {"m": 15 * _M})]
+REW_STARS = [(1, 1, {"m": 100 * _M, "s": 100, "fp": 10, "cs": ["fl_white"]}), (2, 3, {"m": 50 * _M, "s": 40, "fp": 5}), (4, 10, {"m": 20 * _M, "fp": 2})]
 REW_PART = [(30, {"m": 40 * _M, "fp": 10, "fc": 2, "bl": 180, "cs": "fl_blue"}), (10, {"m": 15 * _M, "fp": 5, "fc": 1, "bl": 60}), (1, {"m": 5 * _M, "fp": 2})]
 
 def _meta(c, k, d=0):
@@ -1494,24 +1546,28 @@ def rstat_add(c, uid, win):
 
 def _merge(a, b):
     for k, v in b.items():
-        if k == "cs": a.setdefault("cs", []).extend(v if isinstance(v, list) else [v])
+        if k == "cs": a["cs"] = list(dict.fromkeys(a.get("cs", []) + (v if isinstance(v, list) else [v])))
         elif k == "bp": a["bp"] = max(a.get("bp", 0), v)
+        elif k == "lk": a["lk"] = max(a.get("lk", (0, 0)), tuple(v))
         else: a[k] = a.get(k, 0) + v
 
 def season_plan(c):
     """Кто что получает за текущий сезон. Ничего не меняет в базе (кроме разового заполнения статистики)."""
     n, _e = season_of(c); _rstat_backfill(c); since = _meta(c, "season_start", 0) or int(time.time()) - 14 * 86400
     rs = {r["uid"]: (r["played"], r["wins"]) for r in c.execute("SELECT uid,played,wins FROM rstat WHERE sk=?", (n,))}
+    stp = {r[0]: r[1] for r in c.execute("SELECT uid,-SUM(d) FROM wlog WHERE d<0 AND ts>=? GROUP BY uid", (since,))}
     P = {}
     for u in c.execute("SELECT id,name,last_seen,state FROM users WHERE state IS NOT NULL").fetchall():
         try: st = json.loads(u["state"]) or {}
         except Exception: st = {}
         p, w = rs.get(u["id"], (0, 0))
         P[u["id"]] = {"name": str(u["name"] or "Игрок")[:18], "p": p, "w": w, "lv": int(st.get("lv") or 1), "xp": int(st.get("xp") or 0), "pt": len(st.get("col") or []),
-                      "cr": len(st.get("cars") or []), "sp": int(st.get("sp") or 0), "hid": u["id"] in HIDDEN, "wr": 0, "lr": 0, "rew": {}, "act": p > 0 or (u["last_seen"] or 0) >= since}
+                      "cr": len(st.get("cars") or []), "sp": int(st.get("sp") or 0), "hid": u["id"] in HIDDEN, "wr": 0, "lr": 0, "sr": 0, "tr": 0, "sps": int(st.get("sps") or 0), "stp": stp.get(u["id"], 0), "rew": {}, "act": p > 0 or (u["last_seen"] or 0) >= since}
     wl = sorted([i for i, x in P.items() if not x["hid"] and x["w"] >= SEASON_MIN_WINS], key=lambda i: (-P[i]["w"], P[i]["p"]))
     ll = sorted([i for i, x in P.items() if not x["hid"] and x["act"] and x["lv"] >= SEASON_MIN_LV], key=lambda i: (-P[i]["lv"], -P[i]["xp"]))
-    for lst, tbl, key in ((wl, REW_WINS, "wr"), (ll, REW_LVL, "lr")):
+    sl = sorted([i for i, x in P.items() if not x["hid"] and x["sps"] >= SEASON_MIN_SPEND], key=lambda i: -P[i]["sps"])
+    tl2 = sorted([i for i, x in P.items() if not x["hid"] and x["stp"] >= SEASON_MIN_STARS], key=lambda i: -P[i]["stp"])
+    for lst, tbl, key in ((wl, REW_WINS, "wr"), (ll, REW_LVL, "lr"), (sl, REW_SPEND, "sr"), (tl2, REW_STARS, "tr")):
         for pos, i in enumerate(lst, 1):
             for lo, hi, r in tbl:
                 if lo <= pos <= hi: P[i][key] = pos; _merge(P[i]["rew"], r); break
@@ -1527,6 +1583,7 @@ def rew_text(r):
     if r.get("s"): o.append("%d ⭐" % r["s"])
     if r.get("fp"): o.append("%d круток номера" % r["fp"])
     if r.get("fc"): o.append("%d круток машины" % r["fc"])
+    if r.get("lk"): o.append("удача ×%s на %d ч" % (r["lk"][0], r["lk"][1] // 60))
     if r.get("bl"): o.append("удача ×2 на %s" % ("%d ч" % (r["bl"] // 60) if r["bl"] % 60 == 0 else "%d мин" % r["bl"]))
     for k in r.get("cs", []): o.append("🎨 " + COSM_NAME.get(k, k))
     if r.get("bp"): o.append("Battle Pass %s на новый сезон" % ("Премиум+" if r["bp"] == 2 else "Премиум"))
@@ -1543,17 +1600,18 @@ def season_apply(c, P, old, new, days):
         gift(c, uid, {"t": "setbal", "v": SEASON_BAL})
         if r.get("m"): gift(c, uid, {"t": "bal", "v": r["m"]})
         if r.get("bl"): gift(c, uid, {"t": "boost", "k": "bl", "v": r["bl"]})
+        if r.get("lk"): gift(c, uid, {"t": "boost", "k": "bl", "v": r["lk"][1], "x": r["lk"][0]})
         if r.get("fp"): gift(c, uid, {"t": "fp", "v": r["fp"]})
         if r.get("fc"): gift(c, uid, {"t": "fc", "v": r["fc"]})
         if r.get("s"): wadd(c, uid, r["s"], "season-reward")
         for k in r.get("cs", []): c.execute("INSERT OR IGNORE INTO cosm VALUES(?,?,?)", (uid, k, now))
         if r.get("bp"): c.execute("INSERT OR REPLACE INTO bp(uid,sk,tier) VALUES(?,?,?)", (uid, new, r["bp"]))
         if x["act"] and not x["hid"]:
-            gift(c, uid, {"t": "recap", "v": {"n": old, "nx": new, "p": x["p"], "w": x["w"], "wr": x["wr"], "lv": x["lv"], "lr": x["lr"], "pt": x["pt"], "cr": x["cr"], "sp": x["sp"], "rw": rew_text(r), "bal": SEASON_BAL}})
+            gift(c, uid, {"t": "recap", "v": {"n": old, "nx": new, "p": x["p"], "w": x["w"], "wr": x["wr"], "lv": x["lv"], "lr": x["lr"], "sr": x["sr"], "tr": x["tr"], "pt": x["pt"], "cr": x["cr"], "sp": x["sp"], "rw": rew_text(r), "bal": SEASON_BAL}})
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_name',?)", (new,)); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_end',?)", (str(now + days * 86400),))
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_start',?)", (str(now),)); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rstat_bf',?)", (new,)); c.commit()
     for uid, x in P.items():   # личные сообщения тем, кто в призах
-        if x["hid"] or not (x["wr"] or x["lr"] or x["p"] >= 10): continue
+        if x["hid"] or not (x["wr"] or x["lr"] or x["sr"] or x["tr"] or x["p"] >= 10): continue
         notify(uid, "🏁 Итоги сезона %s\n%s\nНаграды: %s\n\nНовый сезон %s начался: у всех %s сум, номера и машины остались. Заходи за наградой!" % (
             old, "Гонок: %d, побед: %d%s%s" % (x["p"], x["w"], (", место по победам: %d" % x["wr"]) if x["wr"] else "", (", место по уровню: %d" % x["lr"]) if x["lr"] else ""), ", ".join(rew_text(x["rew"])) or "—", new, fnum(SEASON_BAL)))
 
