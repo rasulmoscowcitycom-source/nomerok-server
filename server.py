@@ -1589,7 +1589,7 @@ def rew_text(r):
     if r.get("bp"): o.append("Battle Pass %s на новый сезон" % ("Премиум+" if r["bp"] == 2 else "Премиум"))
     return o
 
-COSM_NAME = {"chrome": "краска Хром", "gold": "краска Золото", "matte": "краска Мат", "pearl": "краска Перламутр", "candy": "краска Кэнди",
+COSM_NAME = {"bp_neon": "краска Неон (Battle Pass)", "bp_royal": "краска Королевский (Battle Pass)", "bp_ice": "ледяное пламя (Battle Pass)", "bp_fire": "огненное пламя (Battle Pass)", "chrome": "краска Хром", "gold": "краска Золото", "matte": "краска Мат", "pearl": "краска Перламутр", "candy": "краска Кэнди",
              "fl_blue": "синее пламя", "fl_green": "зелёное пламя", "fl_pink": "розовое пламя", "fl_white": "белое пламя", "fl_gold": "золотое пламя"}
 
 def season_apply(c, P, old, new, days):

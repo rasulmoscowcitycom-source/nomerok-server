@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL
+from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL, COSM, COSM_NAME, BPC
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -156,12 +156,19 @@ def parse_gift(a):  # a = слова после ID игрока
         if len(a) > 3 and a[1] == "luck":   # множитель удачи: /give ID boost luck 120 5
             g["x"] = max(2, min(50, int(a[3])))
         return g
+    if kind == "stars": return {"t": "stars", "v": max(1, min(100000, int(a[1])))}
+    if kind in ("paint", "flame"):   # краски и цвет пламени: /give ID paint gold, /give ID flame blue, /give ID paint all
+        w = a[1].lower(); pool = [k for k in list(COSM) + list(BPC) if (k.startswith("fl_") or k in ("bp_ice", "bp_fire")) == (kind == "flame")]
+        if w == "all": return {"t": "cosm", "v": pool}
+        k = next((x for x in pool if x == w or x == "fl_" + w or x == "bp_" + w), None)
+        if not k: raise ValueError
+        return {"t": "cosm", "v": [k]}
     raise ValueError
 
 GIVE_HELP = ("Выдача: /give ID что-то (вместо ID можно all - всем игрокам)\n"
              "/give ID noads (отключить рекламу навсегда)\n/give ID bal 1000000\n/give ID plate 01 A 777 AC\n/give ID firm 01 007 AUB\n"
              "/give ID car 3 Название машины (0-4: обычная...секретная)\n/give ID carplate 01 R 700 TT Zeekr 9X\n"
-             "/give ID boost luck 120 (luck/sell/xp, минуты)\n/give ID boost luck 120 10 (удача ×10 на 120 минут, множитель 2-50)\n\nНайти ID: /find имя, /players")
+             "/give ID stars 100 (звёзды ⭐ на звёздный баланс)\n/give ID paint gold (краски: gold chrome matte pearl candy neon royal, или all)\n/give ID flame blue (пламя: blue green pink white gold ice fire, или all)\n/give ID boost luck 120 (luck/sell/xp, минуты)\n/give ID boost luck 120 10 (удача ×10 на 120 минут, множитель 2-50)\n\nНайти ID: /find имя, /players")
 
 @admin
 async def give(u, ctx):
@@ -175,6 +182,15 @@ async def give(u, ctx):
         row = c.execute("SELECT name FROM users WHERE id=?", (int(target),)).fetchone()
         if not row: return await u.message.reply_text("Игрок с таким ID не найден (он должен хотя бы раз открыть игру)")
         ids = [int(target)]; who = f"игроку {row['name']} ({target})"
+    if g["t"] == "stars":
+        for i in ids:
+            wadd(c, i, g["v"], "admin-gift"); notify(i, "🎁 Вам начислено %d ⭐ на звёздный баланс!" % g["v"])
+        c.commit(); return await u.message.reply_text(f"Выдано {g['v']} ⭐ {who}. Они уже на звёздном балансе.")
+    if g["t"] == "cosm":
+        for i in ids:
+            for k in g["v"]: c.execute("INSERT OR IGNORE INTO cosm(uid,k,ts) VALUES(?,?,?)", (i, k, int(time.time())))
+            notify(i, "🎁 Вам выдали: " + ", ".join(COSM_NAME.get(k, k) for k in g["v"][:6]) + (" и ещё" if len(g["v"]) > 6 else "") + ". Они уже в Тюнинге машины!")
+        c.commit(); return await u.message.reply_text(f"Выдано {who}: " + ", ".join(COSM_NAME.get(k, k) for k in g["v"]) + ". Уже в Тюнинге.")
     for i in ids: gift(c, i, g)
     c.commit()
     await u.message.reply_text(f"Выдано {who}. Игрок получит это при следующем заходе (до 45 сек).")
