@@ -583,8 +583,8 @@ def player_profile(b):
             if q and any(_same_pl(x, q) for x in _plates_of(st)): bp = q
         except Exception: pass
         if pr["frame"] and c.execute("SELECT 1 FROM cosm WHERE uid=? AND k=?", (pid, pr["frame"])).fetchone(): frame = pr["frame"]
-    pay = c.execute("SELECT COALESCE(SUM(stars),0) FROM payments WHERE uid=?", (pid,)).fetchone()[0] or 0
-    ton = c.execute("SELECT COALESCE(SUM(d),0) FROM wlog WHERE uid=? AND why='ton'", (pid,)).fetchone()[0] or 0
+    pay = c.execute("SELECT COALESCE(SUM(stars),0) FROM payments WHERE uid=? AND charge NOT LIKE 'wallet:%'", (pid,)).fetchone()[0] or 0   # только настоящие оплаты Telegram: траты с игрового ⭐-кошелька (wallet:) и выданные админом звёзды не считаются донатом
+    ton = c.execute("SELECT COALESCE(SUM(d),0) FROM wlog WHERE uid=? AND why='ton' AND d>0", (pid,)).fetchone()[0] or 0
     rs = c.execute("SELECT COALESCE(SUM(played),0),COALESCE(SUM(wins),0) FROM rstat WHERE uid=?", (pid,)).fetchone()
     cv = None
     if best: cv = {"n": str(best.get("n") or "")[:60], "t": int(best.get("t") or 0), "m": best.get("m") or 1, "pl": best.get("pl") if isinstance(best.get("pl"), dict) else None}
