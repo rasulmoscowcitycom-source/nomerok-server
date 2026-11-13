@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, restore_list, restore_missing, stars_audit, stars_audit_fix, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL, COSM, COSM_NAME, BPC
+from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, BOT_USERNAME, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, restore_list, restore_missing, stars_audit, stars_audit_fix, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL, COSM, COSM_NAME, BPC
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -14,10 +14,25 @@ def admin(f):
         if u.effective_user.id in ADMINS: await f(u, ctx)
     return w
 
-def play_kb():
+def SB(text, style=None, **kw):   # кнопка с цветом (Bot API: style = primary синяя / success зелёная / danger красная)
+    return InlineKeyboardButton(text, api_kwargs={"style": style} if style else None, **kw)
+
+FX_FIRE, FX_PARTY = "5104841245755180586", "5046509860389126442"   # анимация-эффект сообщения: 🔥 и 🎉
+
+async def send_fx(msg, text, kb, fx=None):
+    """Отправить с цветными кнопками и анимацией; если Telegram что-то не принял - обычным способом."""
+    try: return await msg.reply_text(text, reply_markup=kb(True), parse_mode="HTML", **({"message_effect_id": fx} if fx else {}))
+    except Exception: return await msg.reply_text(text, reply_markup=kb(False), parse_mode="HTML")
+
+def play_kb(styled=True):
+    S = (lambda t, s, **k: SB(t, s, **k)) if styled else (lambda t, s, **k: InlineKeyboardButton(t, **k))
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎰 Играть", web_app=WebAppInfo(url=URL))],
-        [InlineKeyboardButton("📖 Как играть", callback_data="how"), InlineKeyboardButton("📢 Канал", url=CHANNEL)]])
+        [S("🎰 Играть", "success", web_app=WebAppInfo(url=URL))],
+        [S("📖 Как играть", "primary", callback_data="how"), InlineKeyboardButton("📢 Канал", url=CHANNEL)]])
+
+def gate_kb(styled=True):
+    S = (lambda t, s, **k: SB(t, s, **k)) if styled else (lambda t, s, **k: InlineKeyboardButton(t, **k))
+    return InlineKeyboardMarkup([[S("📢 Подписаться на канал", "primary", url=REQUIRED_URL)], [S("✅ Я подписался", "success", callback_data="chk")]])
 
 def welcome_text(name, known):
     if known:
@@ -43,19 +58,18 @@ async def start(u: Update, ctx):
         except ValueError: pass
     name = user.first_name or "игрок"
     if not await is_sub(ctx.bot, user.id):
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📢 Подписаться", url=REQUIRED_URL)],
-                                   [InlineKeyboardButton("✅ Я подписался", callback_data="chk")]])
-        return await u.message.reply_text(f"👋 Привет, <b>{name}</b>!\n\nЧтобы начать играть, подпишитесь на наш канал и нажмите «Я подписался».",
-                                          reply_markup=kb, parse_mode="HTML")
-    await u.message.reply_text(welcome_text(name, known), reply_markup=play_kb(), parse_mode="HTML")
+        return await send_fx(u.message, f"👋 Привет, <b>{name}</b>!\n\n🔒 Чтобы начать играть, подпишитесь на наш канал и нажмите «✅ Я подписался».", gate_kb, FX_FIRE)
+    await send_fx(u.message, welcome_text(name, known), play_kb, FX_PARTY if not known else None)
 
 async def chk(u: Update, ctx):
     q = u.callback_query; user = q.from_user
     if not await is_sub(ctx.bot, user.id):
-        return await q.answer("Вы ещё не подписаны на канал", show_alert=True)
-    await q.answer("Готово!")
+        return await q.answer("❌ Вы ещё не подписаны на канал. Подпишитесь и нажмите снова", show_alert=True)
+    await q.answer("✅ Подписка найдена!")
     known = db().execute("SELECT 1 FROM users WHERE id=?", (user.id,)).fetchone()
-    await q.message.reply_text(welcome_text(user.first_name or "игрок", known), reply_markup=play_kb(), parse_mode="HTML")
+    try: await q.message.delete()   # убрать окно с подпиской, чтобы не мешало
+    except Exception: pass
+    await send_fx(q.message, "✅ <b>Подписка подтверждена!</b>\n\n" + welcome_text(user.first_name or "игрок", known), play_kb, FX_PARTY)
 
 async def precheckout(u: Update, ctx):
     await u.pre_checkout_query.answer(ok=True)
@@ -226,6 +240,17 @@ async def addstars(u, ctx):  # /addstars ID N - выдать (или списа�
     new = max(0, row["s"] + n); c.execute("UPDATE users SET stars=? WHERE id=?", (new, uid))
     c.execute("INSERT INTO wlog(uid,d,why,ts) VALUES(?,?,?,?)", (uid, new - row["s"], "admin", int(time.time()))); c.commit()
     await u.message.reply_text(f"Звёздный баланс игрока {row['name']} ({uid}): {row['s']} → {new} ⭐")
+
+@admin
+async def post(u, ctx):   # /post текст - опубликовать сообщение в канале игры (бот должен быть админом канала)
+    parts = (u.message.text or "").split(None, 1)
+    text = parts[1] if len(parts) > 1 else ""
+    if not text: return await u.message.reply_text("Использование: /post текст сообщения (уйдёт в канал)")
+    if not REQUIRED_CHANNEL: return await u.message.reply_text("Канал не задан: добавьте REQUIRED_CHANNEL в Render (например @название_канала)")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎰 Играть", url="https://t.me/" + BOT_USERNAME)]]) if BOT_USERNAME else None
+    try: await ctx.bot.send_message(REQUIRED_CHANNEL, text, reply_markup=kb)
+    except Exception as e: return await u.message.reply_text("Не получилось отправить в канал: %s\nПроверьте, что бот добавлен в канал админом с правом публикации." % e)
+    await u.message.reply_text("✅ Опубликовано в канале")
 
 @admin
 async def broadcast(u, ctx):  # /broadcast текст - рассылка всем игрокам
@@ -611,6 +636,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("restore", restore), ("audit", audit), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("restore", restore), ("audit", audit), ("post", post), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
