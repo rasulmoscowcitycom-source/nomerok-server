@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL, COSM, COSM_NAME, BPC
+from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, restore_list, restore_missing, stars_audit, stars_audit_fix, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL, COSM, COSM_NAME, BPC
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -158,7 +158,7 @@ def parse_gift(a):  # a = слова после ID игрока
         return g
     if kind == "stars": return {"t": "stars", "v": max(1, min(100000, int(a[1])))}
     if kind in ("paint", "flame"):   # краски и цвет пламени: /give ID paint gold, /give ID flame blue, /give ID paint all
-        w = a[1].lower(); pool = [k for k in list(COSM) + list(BPC) if (k.startswith("fl_") or k in ("bp_ice", "bp_fire")) == (kind == "flame")]
+        w = a[1].lower(); pool = [k for k in list(COSM) + list(BPC) if not k.startswith(("frm_", "ex_")) and (k.startswith("fl_") or k in ("bp_ice", "bp_fire")) == (kind == "flame")]
         if w == "all": return {"t": "cosm", "v": pool}
         k = next((x for x in pool if x == w or x == "fl_" + w or x == "bp_" + w), None)
         if not k: raise ValueError
@@ -525,6 +525,35 @@ async def adsint(u, ctx):  # /adsint 60 или /adsint 60 10 (секунды м�
     await u.message.reply_text("Реклама: раз в %d сек, до %d штук подряд, потом пауза ~6 минут.\nИзменить: /adsint секунды штук\nНапример /adsint 60 10\nДействует у игроков при следующем заходе в игру." % (i, f))
 
 @admin
+async def restore(u, ctx):   # /restore ID - снимки коллекции; /restore ID N - вернуть пропавшие номера из снимка N
+    c = db(); a = ctx.args
+    try: uid = int(a[0])
+    except Exception: return await u.message.reply_text("Формат: /restore ID  или  /restore ID НОМЕР_СНИМКА")
+    if len(a) < 2:
+        rows = restore_list(c, uid)
+        if not rows: return await u.message.reply_text("Снимков коллекции этого игрока нет (они начнут копиться после обновления).")
+        out = []
+        for r in rows:
+            n_ = len(json.loads(r["col"])) + sum(1 for x in json.loads(r["cars"]) if isinstance(x, dict) and x.get("pl"))
+            out.append("№%d · %s · номеров %d" % (r["id"], time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600)), n_))
+        return await u.message.reply_text("Снимки игрока %d (новые сверху):\n%s\n\nВернуть пропавшие: /restore %d НОМЕР" % (uid, "\n".join(out), uid))
+    back = restore_missing(c, uid, int(a[1]))
+    if back is None: return await u.message.reply_text("Снимок не найден.")
+    if not back: return await u.message.reply_text("Всё из этого снимка уже есть у игрока, возвращать нечего.")
+    for p in back: gift(c, uid, {"t": "plate", "v": p})
+    c.commit(); notify(uid, "🎁 Мы вернули вам пропавшие номера: %d шт. Зайдите в игру." % len(back))
+    await u.message.reply_text("Возвращено номеров: %d. Игрок получит их при следующем заходе (до 45 сек)." % len(back))
+
+@admin
+async def audit(u, ctx):   # /audit - сверка звёзд всех игроков с журналом; /audit fix - принять старые расхождения как стартовые
+    c = db()
+    if ctx.args and ctx.args[0] == "fix":
+        n = stars_audit_fix(c); return await u.message.reply_text("Принято как стартовые значения: %d игроков. Теперь любое новое расхождение будет тревогой." % n)
+    bad = stars_audit(c)
+    if not bad: return await u.message.reply_text("✅ Звёзды у всех игроков сходятся с журналом. Накруток нет.")
+    await u.message.reply_text("Не сходится у %d игроков:\n%s\n\nЕсли это старые расхождения (до журнала) — /audit fix" % (len(bad), "\n".join("ID %s: баланс %d ⭐, журнал %d ⭐" % x for x in bad[:30])))
+
+@admin
 async def income(u, ctx):   # /income - показать; /income on|off; /income rate ТИР СУМ; /income car ТИП МНОЖ; /income cap ЧАСЫ
     c = db(); cf = income_cfg(c); a = [x.lower() for x in ctx.args]; err = ""
     try:
@@ -582,6 +611,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("restore", restore), ("audit", audit), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()

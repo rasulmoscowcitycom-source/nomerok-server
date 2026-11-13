@@ -50,7 +50,12 @@ CREATE TABLE IF NOT EXISTS auctions(id INTEGER PRIMARY KEY AUTOINCREMENT,seller 
 CREATE TABLE IF NOT EXISTS shop(id INTEGER PRIMARY KEY AUTOINCREMENT,seller INT,item TEXT,price INT,ts INT,status TEXT DEFAULT 'open',buyer INT);
 CREATE TABLE IF NOT EXISTS car_tune(uid INT,cid TEXT,s INT DEFAULT 0,su INT DEFAULT 0,ti INT DEFAULT 0,li INT DEFAULT 0,ae INT DEFAULT 0,ni INT DEFAULT 0,PRIMARY KEY(uid,cid));
 CREATE INDEX IF NOT EXISTS ix_ctcid ON car_tune(cid);
+CREATE TABLE IF NOT EXISTS prof(uid INTEGER PRIMARY KEY,plate TEXT,frame TEXT);
 CREATE TABLE IF NOT EXISTS cosm(uid INT,k TEXT,ts INT,PRIMARY KEY(uid,k));
+CREATE TABLE IF NOT EXISTS gifted(uid INTEGER PRIMARY KEY,ts INT);
+CREATE TABLE IF NOT EXISTS state_hist(uid INT,ts INT,col TEXT,cars TEXT);
+CREATE INDEX IF NOT EXISTS ix_state_hist ON state_hist(uid,ts);
+CREATE TABLE IF NOT EXISTS inc_bank(uid INT PRIMARY KEY,bank REAL DEFAULT 0,rate REAL DEFAULT 0,t INT DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rstat(uid INT,sk TEXT,played INT DEFAULT 0,wins INT DEFAULT 0,PRIMARY KEY(uid,sk));
 CREATE TABLE IF NOT EXISTS races(id INTEGER PRIMARY KEY AUTOINCREMENT,a INT,acar TEXT,stype TEXT,sval INT,aitem TEXT,ts INT,status TEXT DEFAULT 'open',b INT,bcar TEXT,bitem TEXT,result TEXT,winner INT);
 CREATE TABLE IF NOT EXISTS upg_pend(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,pk TEXT,win INT,newm INT,ts INT,cnt INT DEFAULT 0);
@@ -264,9 +269,10 @@ def need_own(c, uid, v):
 def uniq_set(c, uid, p):   # передать номер новому владельцу
     c.execute("INSERT OR REPLACE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time())))
 
+def mark_gifted(c, uid): c.execute("INSERT OR REPLACE INTO gifted(uid,ts) VALUES(?,?)", (uid, int(time.time())))
 _GIFTED = {}   # когда игрок последний раз получал что-то от сервера (подарок, приз, выигрыш) - тогда рост баланса честный
 def gift(c, uid, d):
-    _GIFTED[uid] = time.time()
+    _GIFTED[uid] = time.time(); mark_gifted(c, uid)
     try:   # тюнинг переезжает вместе с машиной к новому владельцу; подделанные id и уровни убираются
         if d.get("t") == "car" and isinstance(d.get("v"), dict):
             v = d["v"]; cid = v.get("id")
@@ -436,8 +442,23 @@ def _hidden_ids():   # админы (ADMINS) и HIDE_IDS не показываю
         if x.strip().lstrip("-").isdigit(): out.add(int(x))
     return out
 HIDDEN = _hidden_ids()
-BAL_ROLL = int(os.environ.get("BAL_ROLL", 10 ** 10))   # рост баланса без причины (нет круток, продаж, заданий, подарков) больше этого - откатывается
-BAL_JUMP = int(os.environ.get("BAL_JUMP", 3 * 10 ** 9))   # скачок баланса за одно сохранение, после которого админы получают оповещение
+BAL_ALERT = int(os.environ.get("BAL_ALERT", 5 * 10 ** 8))   # оповещение только о росте баланса, которому НЕТ никакого объяснения
+GIFT_WIN = 3600   # час после подарка/выплаты/приза рост баланса считается честным
+
+def bal_unexplained(c, uid, os_, st):
+    """True только если баланс вырос без единой законной причины: нет круток, продаж, заданий, опыта, подарков и выплат с сервера, не убавилось номеров/машин."""
+    if any((st.get(k) or 0) != (os_.get(k) or 0) for k in ("sp", "sold", "bpx", "xp", "lv", "fp", "fc", "cs", "wins", "sps")): return False
+    for k in ("col", "cars"):
+        a, b = os_.get(k), st.get(k)
+        if isinstance(a, list) and (not isinstance(b, list) or len(b) < len(a)): return False   # продали/отдали/поставили - деньги могли прийти законно
+    if c.execute("SELECT 1 FROM gifts WHERE uid=? LIMIT 1", (uid,)).fetchone(): return False      # подарок ещё не применён
+    g = c.execute("SELECT ts FROM gifted WHERE uid=?", (uid,)).fetchone()
+    if (g and time.time() - g["ts"] < GIFT_WIN) or time.time() - _GIFTED.get(uid, 0) < GIFT_WIN: return False
+    if c.execute("SELECT 1 FROM wlog WHERE uid=? AND ts>? LIMIT 1", (uid, int(time.time()) - GIFT_WIN)).fetchone(): return False   # недавно были операции со звёздами (гонки, аукцион, апгрейды)
+    return True
+
+BAL_ROLL = int(os.environ.get("BAL_ROLL", 10 ** 9))   # рост баланса без причины (нет круток, продаж, заданий, подарков) больше этого - откатывается
+BAL_JUMP = int(os.environ.get("BAL_JUMP", 10 ** 9))   # скачок баланса за одно сохранение, после которого админы получают оповещение
 _JUMP = {}
 
 def bal_backfill():   # один раз: заполнить рейтинг по уже сохранённым игрокам
@@ -520,13 +541,26 @@ def top(b):
         r = c.execute("SELECT bal FROM users WHERE id=?", (uid,)).fetchone(); mb = (r["bal"] if r else 0) or 0
         hid = sorted(HIDDEN); q = ",".join("?" * len(hid))
         rk = c.execute("SELECT COUNT(*) FROM users WHERE bal>?" + (" AND id NOT IN (%s)" % q if hid else ""), [mb] + hid).fetchone()[0] + 1
-        me = {"rank": rk, "bal": mb}
+        me = {"rank": rk, "bal": mb, "id": uid}
     return {"list": out, "me": me}
+
+@api("/api/profile/set")
+def profile_set(b):
+    uid, _ = auth(b.get("initData")); c = db(); st = _ustate(c, uid)
+    frame = str(b.get("frame") or ""); pj = None
+    if frame and (frame not in FRAMES or not c.execute("SELECT 1 FROM cosm WHERE uid=? AND k=?", (uid, frame)).fetchone()): raise HTTPException(400, "Эта рамка не куплена")
+    if b.get("plate"):
+        p = clean_plate(b["plate"])
+        if not any(_same_pl(x, p) for x in _plates_of(st)): raise HTTPException(400, "Этого номера нет в вашем гараже")
+        pj = json.dumps(p, sort_keys=True)
+    c.execute("INSERT OR REPLACE INTO prof(uid,plate,frame) VALUES(?,?,?)", (uid, pj, frame)); c.commit()
+    return {"ok": 1}
 
 @api("/api/profile")
 def player_profile(b):
     """Публичный профиль игрока: лучшая машина с номером, уровень, оборот, донат ⭐, гонки."""
     me, _ = auth(b.get("initData")); c = db()
+    if lim_hit("prof", me, 1, 400): raise HTTPException(429, "Слишком много запросов профилей, попробуйте завтра")
     try: pid = int(b.get("id", 0))
     except (TypeError, ValueError): raise HTTPException(400, "Неверный ID")
     u = c.execute("SELECT id,name,bal,state FROM users WHERE id=?", (pid,)).fetchone()
@@ -542,13 +576,20 @@ def player_profile(b):
         try: return (tier_py(p), int(p.get("m") or 1))
         except Exception: return (0, 1)
     bp = max(col, key=pt) if col else None
+    pr = c.execute("SELECT plate,frame FROM prof WHERE uid=?", (pid,)).fetchone(); frame = ""
+    if pr:
+        try:
+            q = json.loads(pr["plate"]) if pr["plate"] else None
+            if q and any(_same_pl(x, q) for x in _plates_of(st)): bp = q
+        except Exception: pass
+        if pr["frame"] and c.execute("SELECT 1 FROM cosm WHERE uid=? AND k=?", (pid, pr["frame"])).fetchone(): frame = pr["frame"]
     pay = c.execute("SELECT COALESCE(SUM(stars),0) FROM payments WHERE uid=?", (pid,)).fetchone()[0] or 0
     ton = c.execute("SELECT COALESCE(SUM(d),0) FROM wlog WHERE uid=? AND why='ton'", (pid,)).fetchone()[0] or 0
     rs = c.execute("SELECT COALESCE(SUM(played),0),COALESCE(SUM(wins),0) FROM rstat WHERE uid=?", (pid,)).fetchone()
     cv = None
     if best: cv = {"n": str(best.get("n") or "")[:60], "t": int(best.get("t") or 0), "m": best.get("m") or 1, "pl": best.get("pl") if isinstance(best.get("pl"), dict) else None}
     return {"id": pid, "name": (u["name"] or "Игрок")[:24], "lv": int(st.get("lv") or 1), "bal": int(u["bal"] or 0), "spt": int(st.get("spt") or 0),
-            "stars": int(pay) + int(ton), "plates": len(col), "cars": len(cars), "car": cv, "plate": bp, "played": int(rs[0]), "wins": int(rs[1]), "me": pid == me}
+            "stars": int(pay) + int(ton), "plates": len(col), "cars": len(cars), "car": cv, "plate": bp, "played": int(rs[0]), "wins": int(rs[1]), "me": pid == me, "frame": frame}
 
 def wallet_of(c, uid):
     r = c.execute("SELECT COALESCE(stars,0) FROM users WHERE id=?", (uid,)).fetchone()
@@ -565,6 +606,23 @@ def wspend(c, uid, n, why):   # списать звёзды атомарно: н
     c.execute("INSERT INTO wlog(uid,d,why,ts) VALUES(?,?,?,?)", (uid, -n, why, int(time.time())))
 
 def stars_of(c, uid): return wallet_of(c, uid)
+
+def stars_audit(c):
+    """Звёзды хранит только сервер: баланс обязан равняться сумме журнала. Возвращает [(uid, баланс, по журналу)] где не сходится."""
+    return [(r[0], int(r[1]), int(r[2])) for r in c.execute(
+        "SELECT u.id, COALESCE(u.stars,0), COALESCE((SELECT SUM(d) FROM wlog w WHERE w.uid=u.id),0) FROM users u WHERE COALESCE(u.stars,0) != COALESCE((SELECT SUM(d) FROM wlog w WHERE w.uid=u.id),0)")]
+
+def stars_audit_fix(c):   # старые расхождения (до появления журнала): записать «стартовую» строку, чтобы дальше любое отклонение было видно
+    n = 0
+    for uid, bal, lg in stars_audit(c):
+        c.execute("INSERT INTO wlog(uid,d,why,ts) VALUES(?,?,?,?)", (uid, bal - lg, "baseline", int(time.time()))); n += 1
+    c.commit(); return n
+
+_AUD = {}
+def stars_watch(c):   # раз в час: новое расхождение с журналом = звёзды кто-то менял в обход сервера
+    bad = [x for x in stars_audit(c) if x[0] not in HIDDEN and _AUD.get(x[0]) != x[1:]]
+    for x in bad: _AUD[x[0]] = x[1:]
+    if bad: alert_admins("🛑 Звёзды не сходятся с журналом у %d игроков:\n%s\n\nПодробно: /audit" % (len(bad), "\n".join("ID %s: на балансе %d ⭐, по журналу %d ⭐" % x for x in bad[:10])))
 
 @api("/api/load")
 def load(b):
@@ -629,6 +687,33 @@ def uniq_guard(c, uid, st):
     if st.get("_own"): log.warning("uniq: двойники у владельца %s: %s", uid, st["_own"])
     return dups
 
+HIST_KEEP = 8          # сколько снимков коллекции хранить на игрока
+HIST_EVERY = 900       # обычный снимок не чаще раза в 15 минут
+LOSS_MIN = 3           # потеря стольких номеров за одно сохранение - тревога
+
+def _plates_of(st):
+    L = [p for p in (st.get("col") or []) if isinstance(p, dict)]
+    for x in (st.get("cars") or []):
+        if isinstance(x, dict) and isinstance(x.get("pl"), dict): L.append(x["pl"])
+    return L
+
+def hist_snapshot(c, uid, old_json, st):
+    """Перед записью нового состояния: запомнить прежнюю коллекцию и сообщить, если номеров стало резко меньше."""
+    try: o = json.loads(old_json) if old_json else None
+    except Exception: o = None
+    if not isinstance(o, dict): return
+    oc, nc = len(_plates_of(o)), len(_plates_of(st))
+    lost = oc - nc
+    last = c.execute("SELECT MAX(ts) FROM state_hist WHERE uid=?", (uid,)).fetchone()[0] or 0
+    now = int(time.time())
+    if oc and (lost >= LOSS_MIN or now - last > HIST_EVERY):
+        c.execute("INSERT INTO state_hist(uid,ts,col,cars) VALUES(?,?,?,?)", (uid, now, json.dumps(o.get("col") or [], separators=(",", ":")), json.dumps(o.get("cars") or [], separators=(",", ":"))))
+        c.execute("DELETE FROM state_hist WHERE uid=? AND ts NOT IN (SELECT ts FROM state_hist WHERE uid=? ORDER BY ts DESC LIMIT ?)", (uid, uid, HIST_KEEP))
+    if lost >= LOSS_MIN and uid not in HIDDEN:
+        log.warning("ПОТЕРЯ номеров %s: %d -> %d", uid, oc, nc)
+        if not lim_hit("loss_al", uid, 1, 2):
+            for a in HIDDEN: notify(a, "📉 У игрока ID %s в одном сохранении стало меньше номеров: %d → %d (−%d).\nЕсли это не продажа/ставка — вернуть: /restore %s" % (uid, oc, nc, lost, uid))
+
 @api("/api/save")
 def save(b):
     uid, _ = auth(b.get("initData")); c = db(); st = b.get("state")
@@ -657,21 +742,25 @@ def save(b):
         o0 = c.execute("SELECT bal,state FROM users WHERE id=?", (uid,)).fetchone()
         if o0 and uid not in HIDDEN and o0["state"]:
             ob, nb0 = (o0["bal"] or 0), _bal_of(st)
-            if nb0 - ob > BAL_ROLL and time.time() - _GIFTED.get(uid, 0) > 900:
+            if nb0 - ob > BAL_ROLL:
                 os_ = json.loads(o0["state"])
-                same = all((st.get(k) or 0) == (os_.get(k) or 0) for k in ("sp", "sold", "bpx", "xp", "lv", "fp", "fc", "cs"))
-                same = same and all(isinstance(st.get(k), list) == isinstance(os_.get(k), list) and len(st.get(k) or []) <= len(os_.get(k) or []) for k in ("col", "cars"))
-                if same:   # деньги выросли, а ничего не крутили, не продавали и не выполняли - это правка баланса
+                if bal_unexplained(c, uid, os_, st):   # деньги выросли, а ничего не крутили, не продавали и не выполняли - это правка баланса
                     log.warning("ОТКАТ баланса %s: %s -> %s", uid, ob, nb0); st["bal"] = ob; rb = ob
                     if not lim_hit("rb_al", uid, 1, 1): alert_admins("🛑 Накрутка баланса отклонена\nИгрок ID %s пытался изменить баланс %s → %s сум без круток и продаж. Баланс возвращён." % (uid, fnum(ob), fnum(nb0)))
     except Exception: log.exception("rollback check")
     try:    # подозрительный скачок баланса за одно сохранение - сообщаем админам с причиной (читеры правят состояние игры)
         old = c.execute("SELECT bal,state,last_seen FROM users WHERE id=?", (uid,)).fetchone(); nb = _bal_of(st)
-        if old and nb - (old["bal"] or 0) > BAL_JUMP and uid not in HIDDEN and time.time() - _JUMP.get(uid, 0) > 3600:
+        if old and rb is None and nb - (old["bal"] or 0) > BAL_ALERT and uid not in HIDDEN and time.time() - _JUMP.get(uid, 0) > 3600 and old["state"] and bal_unexplained(c, uid, json.loads(old["state"]), st):
             _JUMP[uid] = time.time(); log.warning("ПОДОЗРЕНИЕ: баланс %s: %s -> %s", uid, old["bal"], nb)
             why = jump_why(old["state"], st, old["last_seen"])
-            for a in HIDDEN: notify(a, "⚠️ Подозрительный скачок баланса\nИгрок ID %s: %s → %s сум (+%s)\n\n%s" % (uid, fnum(old["bal"] or 0), fnum(nb), fnum(nb - (old["bal"] or 0)), why), "🎰 Открыть игру")
+            for a in HIDDEN: notify(a, "⚠️ Баланс вырос без причины (ни круток, ни продаж, ни подарков)\nИгрок ID %s: %s → %s сум (+%s)\n\n%s" % (uid, fnum(old["bal"] or 0), fnum(nb), fnum(nb - (old["bal"] or 0)), why), "🎰 Открыть игру")
     except Exception: log.exception("jump check")
+    try: inc_accrue(c, uid, st)
+    except Exception: log.exception("inc accrue")
+    try:
+        _o = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
+        if _o: hist_snapshot(c, uid, _o["state"], st)
+    except Exception: log.exception("hist")
     c.execute("UPDATE users SET state=?,last_seen=?,bal=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), _bal_of(st), uid)); c.commit()
     r = {"ok": 1}
     if rb is not None: r["rollback"] = 1; r["bal"] = rb
@@ -684,7 +773,7 @@ def clear(b):
     uid, _ = auth(b.get("initData")); c = db()
     try: ids = [int(i) for i in (b.get("ids") or [])][:500]
     except (TypeError, ValueError): raise HTTPException(400, "Неверные данные")
-    if ids: c.execute("DELETE FROM gifts WHERE uid=? AND id IN (%s)" % ",".join("?" * len(ids)), [uid, *ids]); c.commit()
+    if ids: c.execute("DELETE FROM gifts WHERE uid=? AND id IN (%s)" % ",".join("?" * len(ids)), [uid, *ids]); mark_gifted(c, uid); c.commit()
     return {"ok": 1}
 
 @api("/api/gifts")
@@ -701,7 +790,7 @@ def promo(b):
     except sqlite3.IntegrityError: raise HTTPException(400, "Вы уже активировали этот код")
     if c.execute("UPDATE promos SET used=used+1 WHERE code=? AND used<max_uses", (code,)).rowcount != 1:   # последний код забрали в ту же секунду
         c.rollback(); raise HTTPException(400, "Промокод закончился")
-    c.commit()
+    mark_gifted(c, uid); c.commit()
     _GIFTED[uid] = time.time()
     return {"reward": json.loads(p["reward"])}
 
@@ -1077,6 +1166,10 @@ def send_car(b):
     st["cars"] = [y for y in st["cars"] if y is not x]; _usave(c, uid, st)
     c.execute("INSERT INTO tlog(uid,d,why,ts) VALUES(?,0,'send',?)", (uid, int(time.time())))
     v = json.loads(json.dumps(x)); v.pop("tn", None)
+    try:
+        if x.get("id") or isinstance(x.get("pl"), dict):   # без id и номера такую машину не отличить от второй такой же - не рискуем лишним
+            c.execute("INSERT INTO upg_pend(uid,pk,win,newm,ts,cnt) VALUES(?,?,?,?,?,?)", (uid, json.dumps({"t": "car", "v": x}, sort_keys=True), -1, 0, int(time.time()), 0))
+    except Exception: log.exception("send_car pend")
     gift(c, to, {"t": "car", "v": v}); c.commit()
     me = c.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
     notify(to, "🎁 Игрок %s (ID %d) передал вам машину %s%s! Она уже в гараже." % (((me["name"] if me else "") or "Игрок"), uid, v.get("n", ""), " с номером " + nft_title(v["pl"]) if isinstance(v.get("pl"), dict) else ""))
@@ -1480,9 +1573,11 @@ def season_info(c, uid):
             "ads": 0 if ads_is_off(c) else 1, "ai": ads_cfg(c), "inc": income_cfg(c)}
 
 # ---------------------------------------------------------------- пассивный доход: номер на машине приносит сумы в минуту
-INC_DEF = {"on": 1, "r": [50000, 100000, 200000, 800000, 1500000, 3000000], "c": [1, 1.3, 1.7, 2, 3], "cap": 8}   # сум/мин по редкости номера; множитель по редкости машины; копится максимум cap часов
+INC_DEF = {"on": 1, "r": [4000, 8000, 15000, 40000, 80000, 150000], "c": [1, 1.2, 1.4, 1.7, 2], "cap": 4}   # сум/мин по редкости номера; множитель по редкости машины; копится максимум cap часов
 
 def income_cfg(c):
+    if not c.execute("SELECT 1 FROM meta WHERE k='inc_v2'").fetchone():   # один раз: сбросить старые (слишком щедрые) ставки на новые
+        c.execute("DELETE FROM meta WHERE k='inc_cfg'"); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('inc_v2','1')"); c.commit()
     r = c.execute("SELECT v FROM meta WHERE k='inc_cfg'").fetchone(); cf = json.loads(json.dumps(INC_DEF))
     try:
         j = json.loads(r[0]); cf["on"] = 1 if j.get("on", 1) else 0
@@ -1491,6 +1586,68 @@ def income_cfg(c):
         cf["cap"] = max(1, min(72, int(j.get("cap", cf["cap"]))))
     except Exception: pass
     return cf
+
+INC_MAXCARS = 10   # сколько машин максимум учитывается в доходе
+
+def inc_rate(c, st):
+    """Доход в минуту по сохранённому гаражу: считает сервер."""
+    cf = income_cfg(c)
+    if not cf["on"]: return 0.0
+    s = 0.0
+    for x in (st.get("cars") or [])[:INC_MAXCARS]:
+        if not isinstance(x, dict) or not isinstance(x.get("pl"), dict): continue
+        try: s += cf["r"][min(5, max(0, tier_py(x["pl"])))] * cf["c"][min(4, max(0, int(x.get("t") or 0)))]
+        except Exception: pass
+    return s
+
+def inc_accrue(c, uid, st=None):
+    """Начислить накопленное по серверному времени со старой ставкой; если дали состояние - запомнить новую ставку."""
+    now = int(time.time()); cf = income_cfg(c)
+    r = c.execute("SELECT bank,rate,t FROM inc_bank WHERE uid=?", (uid,)).fetchone()
+    bank, rate, t0 = (r["bank"], r["rate"], r["t"]) if r else (0.0, 0.0, now)
+    dt = max(0, min(now - t0, cf["cap"] * 3600)) / 60.0
+    mx = max(rate, inc_rate(c, st) if st is not None else rate) * cf["cap"] * 60
+    bank = min(max(mx, bank), bank + rate * dt)
+    if st is not None: rate = inc_rate(c, st)
+    c.execute("INSERT OR REPLACE INTO inc_bank(uid,bank,rate,t) VALUES(?,?,?,?)", (uid, bank, rate, now))
+    return bank, rate, cf
+
+@api("/api/inc/info")
+def inc_info(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    bank, rate, cf = inc_accrue(c, uid); c.commit()
+    return {"bank": int(bank), "rate": rate, "cap": cf["cap"], "on": cf["on"]}
+
+@api("/api/inc/collect")
+def inc_collect(b):
+    uid, _ = auth(b.get("initData")); c = db()
+    bank, rate, cf = inc_accrue(c, uid)
+    amt = int(bank)
+    if amt < 1: raise HTTPException(400, "Пока нечего забирать")
+    c.execute("UPDATE inc_bank SET bank=bank-? WHERE uid=?", (amt, uid)); mark_gifted(c, uid); c.commit()
+    return {"amt": amt, "bank": 0}
+
+def restore_list(c, uid):
+    return c.execute("SELECT rowid AS id,ts,col,cars FROM state_hist WHERE uid=? ORDER BY ts DESC", (uid,)).fetchall()
+
+def restore_missing(c, uid, hid):
+    """Номера из снимка, которых нет сейчас у игрока (учитывая количество): вернуть подарком."""
+    r = c.execute("SELECT col,cars FROM state_hist WHERE uid=? AND rowid=?", (uid, hid)).fetchone()
+    if not r: return None
+    old = {"col": json.loads(r["col"]), "cars": json.loads(r["cars"])}
+    u = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
+    cur = _plates_of(json.loads(u["state"]) if u and u["state"] else {})
+    have = list(cur); miss = []
+    for p in _plates_of(old):
+        for i, h in enumerate(have):
+            if _same_pl(h, p): have.pop(i); break
+        else: miss.append(p)
+    back = []
+    for p in miss[:400]:
+        try: pp = clean_plate(p)
+        except HTTPException: continue
+        back.append(pp)
+    return back
 
 def income_save(c, cf):
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('inc_cfg',?)", (json.dumps(cf),)); c.commit()
@@ -1513,11 +1670,11 @@ _M = 1_000_000
 REW_WINS = [(1, 1, {"m": 150 * _M, "s": 200, "lk": (1.3, 1440), "cs": ["gold", "chrome", "pearl", "candy", "matte", "fl_gold"]}),
             (2, 2, {"m": 100 * _M, "s": 120, "cs": ["chrome", "pearl", "fl_white"]}),
             (3, 3, {"m": 70 * _M, "s": 80, "cs": ["pearl", "fl_blue"]}), (4, 10, {"m": 30 * _M, "s": 30, "bl": 120})]
-REW_LVL = [(1, 1, {"m": 100 * _M, "s": 100, "cs": ["fl_gold", "fl_pink", "fl_green", "fl_blue", "fl_white"]}), (2, 2, {"m": 70 * _M, "s": 60, "cs": ["fl_pink", "fl_green"]}),
+REW_LVL = [(1, 1, {"m": 100 * _M, "cs": ["fl_gold", "fl_pink", "fl_green", "fl_blue", "fl_white"]}), (2, 2, {"m": 70 * _M, "cs": ["fl_pink", "fl_green"]}),
            (3, 3, {"m": 50 * _M, "s": 40, "cs": "fl_green"}), (4, 10, {"m": 20 * _M, "bl": 120})]
 SEASON_MIN_SPEND = 50 * _M    # чтобы попасть в топ по тратам сумов
 SEASON_MIN_STARS = 20         # чтобы попасть в топ по трате ⭐
-REW_SPEND = [(1, 1, {"m": 80 * _M, "s": 60, "cs": ["candy", "matte"]}), (2, 3, {"m": 40 * _M, "s": 30}), (4, 10, {"m": 15 * _M})]
+REW_SPEND = [(1, 1, {"m": 80 * _M, "fp": 10, "cs": ["candy", "matte"]}), (2, 3, {"m": 40 * _M, "fp": 4}), (4, 10, {"m": 15 * _M})]
 REW_STARS = [(1, 1, {"m": 100 * _M, "s": 100, "fp": 10, "cs": ["fl_white"]}), (2, 3, {"m": 50 * _M, "s": 40, "fp": 5}), (4, 10, {"m": 20 * _M, "fp": 2})]
 REW_PART = [(30, {"m": 40 * _M, "fp": 10, "fc": 2, "bl": 180, "cs": "fl_blue"}), (10, {"m": 15 * _M, "fp": 5, "fc": 1, "bl": 60}), (1, {"m": 5 * _M, "fp": 2})]
 
@@ -1590,7 +1747,7 @@ def rew_text(r):
     return o
 
 COSM_NAME = {"bp_neon": "краска Неон (Battle Pass)", "bp_royal": "краска Королевский (Battle Pass)", "bp_ice": "ледяное пламя (Battle Pass)", "bp_fire": "огненное пламя (Battle Pass)", "chrome": "краска Хром", "gold": "краска Золото", "matte": "краска Мат", "pearl": "краска Перламутр", "candy": "краска Кэнди",
-             "fl_blue": "синее пламя", "fl_green": "зелёное пламя", "fl_pink": "розовое пламя", "fl_white": "белое пламя", "fl_gold": "золотое пламя"}
+             "fl_blue": "синее пламя", "fl_green": "зелёное пламя", "fl_pink": "розовое пламя", "fl_white": "белое пламя", "fl_gold": "золотое пламя", "frm_gold": "золотая рамка профиля", "frm_neon": "неоновая рамка профиля", "frm_ice": "ледяная рамка профиля", "frm_fire": "огненная рамка профиля", "frm_royal": "королевская рамка профиля", "ex_turbo": "турбо-выхлоп (+1% скорость)", "ex_inferno": "инферно-выхлоп (+2% скорость)"}
 
 def season_apply(c, P, old, new, days):
     """Новый сезон: у всех сумы = SEASON_BAL (номера и машины остаются), награды за итоги, статистика сезона обнуляется (по новому названию)."""
@@ -2016,7 +2173,10 @@ def race_car(c, uid, st, car):
     x = _find_car(st, cc)
     if not x: raise HTTPException(400, "Этой машины нет в вашем гараже (обновите игру)")
     tn = tune_row(c, uid, x["id"]) if x.get("id") else [0] * 6
-    return x, car_stats(x.get("n", ""), x.get("t"), tn)
+    cs = car_stats(x.get("n", ""), x.get("t"), tn)
+    bonus = max([EXH[r[0]] for r in c.execute("SELECT k FROM cosm WHERE uid=?", (uid,)) if r[0] in EXH] or [0])
+    if bonus: cs["tt"] = round(cs["tt"] * (1 - bonus), 3); cs["t100"] = round(cs["t100"] * (1 - bonus), 1); cs["ex"] = bonus
+    return x, cs
 
 @api("/api/tune")
 def tune(b):
@@ -2198,7 +2358,11 @@ def _race_refund(c, r, why=""):   # вернуть ставку создател
     elif r["aitem"]: gift(c, r["a"], json.loads(r["aitem"]))
 
 COSM = {"chrome": 40, "gold": 60, "matte": 25, "pearl": 35, "candy": 45,      # премиум-краски
-        "fl_blue": 30, "fl_green": 30, "fl_pink": 30, "fl_white": 40, "fl_gold": 60}   # цвет пламени (звёзды)
+        "fl_blue": 30, "fl_green": 30, "fl_pink": 30, "fl_white": 40, "fl_gold": 60,   # цвет пламени (звёзды)
+        "frm_gold": 80, "frm_neon": 100, "frm_ice": 120, "frm_fire": 150, "frm_royal": 250,   # рамки профиля
+        "ex_turbo": 150, "ex_inferno": 300}   # выхлопы: ускоряют машину в гонках
+FRAMES = ("frm_gold", "frm_neon", "frm_ice", "frm_fire", "frm_royal")
+EXH = {"ex_turbo": 0.010, "ex_inferno": 0.020}   # на сколько быстрее время заезда (лучший из купленных)
 
 @api("/api/cosm/list")
 def cosm_list(b):
@@ -2462,7 +2626,7 @@ def _bg():   # фоновый поток: торги, системные лот�
         if f.startswith("tmp-") or f.endswith(".part"):
             try: os.remove(os.path.join(BK_DIR, f))
             except OSError: pass
-    last_clean = last_bk = last_chk = 0
+    last_clean = last_bk = last_chk = last_stw = 0
     while True:
         try: c = db(); settle(c); sa_settle(c); duel_expire(c); race_expire(c); system_lot(c)
         except Exception: log.exception("торги")
@@ -2475,6 +2639,10 @@ def _bg():   # фоновый поток: торги, системные лот�
             last_clean = t
             try: cleanup(db())
             except Exception: log.exception("чистка базы")
+        if t - last_stw > 3600:
+            last_stw = t
+            try: stars_watch(db())
+            except Exception: log.exception("stars_watch")
         if t - last_bk > 3600:
             last_bk = t
             try: auto_backup()
