@@ -1020,7 +1020,7 @@ window.showRecap=function(v){var e=$("rcpv");if(!e){e=document.createElement("di
  e.hidden=false;backSync();try{chime(3)}catch(x){}};
 
 /* ---------- пассивный доход: копится и считается на сервере ---------- */
-(function(){var INC0={on:1,r:[4000,8000,15000,40000,80000,150000],c:[1,1.2,1.4,1.7,2],cap:4},IB=null,BUSY=0,LF=0;
+(function(){var INC0={on:1,r:[15000,30000,60000,150000,300000,600000],c:[1,1.3,1.5,1.8,2.2],cap:6},IB=null,BUSY=0,LF=0;
  function cfg(){var s=(window.SEAS||{}).inc;return s&&s.r?s:INC0}
  function cfgOn(){return !!cfg().on}window.cfgOn=cfgOn;
  window.incOne=function(c){var f=cfg();return f.on&&c&&c.pl?Math.round((f.r[tier(c.pl)]||0)*(f.c[c.t]||1)):0};
