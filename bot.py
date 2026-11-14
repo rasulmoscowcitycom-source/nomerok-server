@@ -587,7 +587,17 @@ async def plate(u, ctx):   # /plate ТЕКСТ - у кого закреплён 
     out = []
     for r in rows:
         nm = c.execute("SELECT name FROM users WHERE id=?", (r["owner"],)).fetchone()
-        out.append("%s → владелец ID %s (%s), с %s" % (r["key"], r["owner"], (nm["name"] if nm else "?"), time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600))))
+        has = "?"
+        try:
+            ks = r["key"].split("|"); ow = c.execute("SELECT state FROM users WHERE id=?", (r["owner"],)).fetchone()
+            sj = json.loads(ow["state"]) if ow and ow["state"] else {}
+            L = [p for p in (sj.get("col") or []) if isinstance(p, dict)]
+            for x in (sj.get("cars") or []):
+                if isinstance(x, dict) and isinstance(x.get("pl"), dict): L.append(x["pl"])
+            hit = [p for p in L if str(p.get("d")) == ks[3] and str(p.get("z")) == ks[4]]
+            has = "✅ сейчас у него есть" + (" (на машине)" if any(isinstance(x, dict) and isinstance(x.get("pl"), dict) and str(x["pl"].get("d")) == ks[3] and str(x["pl"].get("z")) == ks[4] for x in (sj.get("cars") or [])) and hit and not any(isinstance(p, dict) and p in (sj.get("col") or []) for p in hit) else "") if hit else "❌ в его коллекции и на машинах этого номера сейчас НЕТ (продан или убран)"
+        except Exception: pass
+        out.append("%s → владелец ID %s (%s), с %s\n   %s" % (r["key"], r["owner"], (nm["name"] if nm else "?"), time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600)), has))
     await u.message.reply_text("Закреплённые номера:\n" + "\n".join(out))
 
 @admin
