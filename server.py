@@ -95,6 +95,8 @@ def init_db():   # один раз при запуске: таблицы, инд
             except Exception: pass
         try: c.execute("ALTER TABLE users ADD COLUMN bal INT DEFAULT 0")
         except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE users ADD COLUMN sv INT DEFAULT 0")   # версия сохранения: защита от затирания новых данных старыми
+        except sqlite3.OperationalError: pass
         try: c.execute("ALTER TABLE users ADD COLUMN stars INT DEFAULT 0")   # звёздный кошелёк игрока (хранится на сервере)
         except sqlite3.OperationalError: pass
         c.execute("CREATE TABLE IF NOT EXISTS wlog(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INT,d INT,why TEXT,ts INT)")
@@ -630,8 +632,8 @@ def load(b):
     existed = c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone()
     c.execute("INSERT INTO users(id,name,first_seen,last_seen) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=?,last_seen=?", (uid, name, now, now, name, now))
     if not existed: ref_credit(c, uid)
-    row = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
-    head = json.dumps({"uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}, separators=(",", ":"))
+    row = c.execute("SELECT state,sv FROM users WHERE id=?", (uid,)).fetchone()
+    head = json.dumps({"sv": (row["sv"] or 0) if row else 0, "uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}, separators=(",", ":"))
     c.commit()
     state = row["state"] if row and row["state"] else "null"   # состояние уже хранится как JSON - вставляем как есть
     if state != "null" and ('"z"' in state):
@@ -689,6 +691,7 @@ def uniq_guard(c, uid, st):
 
 HIST_KEEP = 8          # сколько снимков коллекции хранить на игрока
 HIST_EVERY = 900       # обычный снимок не чаще раза в 15 минут
+MASS_LOSS = 8          # столько номеров за одно сохранение без причины - сохранение отклоняется
 LOSS_MIN = 3           # потеря стольких номеров за одно сохранение - тревога
 
 def _plates_of(st):
@@ -709,7 +712,9 @@ def hist_snapshot(c, uid, old_json, st):
     if oc and (lost >= LOSS_MIN or now - last > HIST_EVERY):
         c.execute("INSERT INTO state_hist(uid,ts,col,cars) VALUES(?,?,?,?)", (uid, now, json.dumps(o.get("col") or [], separators=(",", ":")), json.dumps(o.get("cars") or [], separators=(",", ":"))))
         c.execute("DELETE FROM state_hist WHERE uid=? AND ts NOT IN (SELECT ts FROM state_hist WHERE uid=? ORDER BY ts DESC LIMIT ?)", (uid, uid, HIST_KEEP))
-    if lost >= LOSS_MIN and uid not in HIDDEN:
+    sold_d = (st.get("sold") or 0) - (o.get("sold") or 0)
+    pend = c.execute("SELECT 1 FROM upg_pend WHERE uid=? AND ts>? LIMIT 1", (uid, int(time.time()) - 180)).fetchone()
+    if lost >= LOSS_MIN and uid not in HIDDEN and sold_d < lost and not pend:   # продажа, ставка в гонке, передача машины - не тревога
         log.warning("ПОТЕРЯ номеров %s: %d -> %d", uid, oc, nc)
         if not lim_hit("loss_al", uid, 1, 2):
             for a in HIDDEN: notify(a, "📉 У игрока ID %s в одном сохранении стало меньше номеров: %d → %d (−%d).\nЕсли это не продажа/ставка — вернуть: /restore %s" % (uid, oc, nc, lost, uid))
@@ -721,6 +726,21 @@ def save(b):
     if str(st.get("rid", 0)) != str(get_rid(c)): return {"stale": 1}   # игра из до сброса прогресса - не сохраняем
     if not st.get("cl2") and isinstance(st.get("cars"), list):   # старый клиент: Бибиша теперь только по команде, лишние убираем
         st["cars"] = [x for x in st["cars"] if not (isinstance(x, dict) and "Бибиша" in str(x.get("n", "")))]
+    cur = c.execute("SELECT state,sv FROM users WHERE id=?", (uid,)).fetchone()
+    base = b.get("base")
+    if cur and base is not None and (cur["sv"] or 0) > int(base or 0):   # это сохранение собрано из устаревших данных (другое устройство, старая страница, потерянный ответ) - не затираем новое
+        log.warning("УСТАРЕВШЕЕ сохранение отклонено %s: base=%s sv=%s", uid, base, cur["sv"]); return {"stale": 1}
+    try:   # защита от массовой потери: много номеров исчезло, а ни продажи, ни ставки, ни передачи нет - сохранение испорчено, берём серверное
+        if cur and cur["state"] and uid not in HIDDEN:
+            o_ = json.loads(cur["state"]); lost_ = len(_plates_of(o_)) - len(_plates_of(st))
+            sold_ = (st.get("sold") or 0) - (o_.get("sold") or 0)
+            pend_ = c.execute("SELECT 1 FROM upg_pend WHERE uid=? AND ts>? LIMIT 1", (uid, int(time.time()) - 180)).fetchone()
+            if lost_ >= MASS_LOSS and sold_ < lost_ and not pend_:
+                hist_snapshot(c, uid, cur["state"], st); c.commit()
+                log.warning("МАССОВАЯ ПОТЕРЯ отклонена %s: -%d", uid, lost_)
+                if not lim_hit("mass_al", uid, 1, 600): alert_admins("🛡 Защита сработала: сохранение игрока ID %s убрало бы сразу %d номеров без продажи и ставки. Оно отклонено, у игрока остались прежние номера. Ничего делать не нужно." % (uid, lost_))
+                return {"stale": 1}
+    except Exception: log.exception("mass loss guard")
     try:   # недавние апгрейды: старое сохранение не должно вернуть сгоревший номер
         c.execute("DELETE FROM upg_pend WHERE ts<?", (int(time.time()) - 120,))
         for r_ in c.execute("SELECT pk,win,newm,cnt FROM upg_pend WHERE uid=? ORDER BY id", (uid,)).fetchall():
@@ -761,8 +781,8 @@ def save(b):
         _o = c.execute("SELECT state FROM users WHERE id=?", (uid,)).fetchone()
         if _o: hist_snapshot(c, uid, _o["state"], st)
     except Exception: log.exception("hist")
-    c.execute("UPDATE users SET state=?,last_seen=?,bal=? WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), _bal_of(st), uid)); c.commit()
-    r = {"ok": 1}
+    c.execute("UPDATE users SET state=?,last_seen=?,bal=?,sv=COALESCE(sv,0)+1 WHERE id=?", (json.dumps(st, separators=(",", ":")), int(time.time()), _bal_of(st), uid)); c.commit()
+    r = {"ok": 1, "sv": (cur["sv"] or 0) + 1 if cur else 1}
     if rb is not None: r["rollback"] = 1; r["bal"] = rb
     if dups: r["dup"] = dups
     if own: r["own"] = own
