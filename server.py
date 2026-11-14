@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS car_tune(uid INT,cid TEXT,s INT DEFAULT 0,su INT DEFA
 CREATE INDEX IF NOT EXISTS ix_ctcid ON car_tune(cid);
 CREATE TABLE IF NOT EXISTS prof(uid INTEGER PRIMARY KEY,plate TEXT,frame TEXT);
 CREATE TABLE IF NOT EXISTS cosm(uid INT,k TEXT,ts INT,PRIMARY KEY(uid,k));
+CREATE TABLE IF NOT EXISTS noads(uid INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS gifted(uid INTEGER PRIMARY KEY,ts INT);
 CREATE TABLE IF NOT EXISTS state_hist(uid INT,ts INT,col TEXT,cars TEXT);
 CREATE INDEX IF NOT EXISTS ix_state_hist ON state_hist(uid,ts);
@@ -275,6 +276,7 @@ def mark_gifted(c, uid): c.execute("INSERT OR REPLACE INTO gifted(uid,ts) VALUES
 _GIFTED = {}   # когда игрок последний раз получал что-то от сервера (подарок, приз, выигрыш) - тогда рост баланса честный
 def gift(c, uid, d):
     _GIFTED[uid] = time.time(); mark_gifted(c, uid)
+    if isinstance(d, dict) and d.get("t") == "noads": c.execute("INSERT OR IGNORE INTO noads(uid) VALUES(?)", (uid,))
     try:   # тюнинг переезжает вместе с машиной к новому владельцу; подделанные id и уровни убираются
         if d.get("t") == "car" and isinstance(d.get("v"), dict):
             v = d["v"]; cid = v.get("id")
@@ -633,7 +635,7 @@ def load(b):
     c.execute("INSERT INTO users(id,name,first_seen,last_seen) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=?,last_seen=?", (uid, name, now, now, name, now))
     if not existed: ref_credit(c, uid)
     row = c.execute("SELECT state,sv FROM users WHERE id=?", (uid,)).fetchone()
-    head = json.dumps({"sv": (row["sv"] or 0) if row else 0, "uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}, separators=(",", ":"))
+    head = json.dumps({"noads": 1 if noads_of(c, uid) else 0, "sv": (row["sv"] or 0) if row else 0, "uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}, separators=(",", ":"))
     c.commit()
     state = row["state"] if row and row["state"] else "null"   # состояние уже хранится как JSON - вставляем как есть
     if state != "null" and ('"z"' in state):
@@ -727,6 +729,8 @@ def save(b):
     if not st.get("cl2") and isinstance(st.get("cars"), list):   # старый клиент: Бибиша теперь только по команде, лишние убираем
         st["cars"] = [x for x in st["cars"] if not (isinstance(x, dict) and "Бибиша" in str(x.get("n", "")))]
     cur = c.execute("SELECT state,sv FROM users WHERE id=?", (uid,)).fetchone()
+    if st.get("noads"): c.execute("INSERT OR IGNORE INTO noads(uid) VALUES(?)", (uid,))
+    elif noads_of(c, uid): st["noads"] = 1
     base = b.get("base")
     if cur and base is not None and (cur["sv"] or 0) > int(base or 0):   # это сохранение собрано из устаревших данных (другое устройство, старая страница, потерянный ответ) - не затираем новое
         log.warning("УСТАРЕВШЕЕ сохранение отклонено %s: base=%s sv=%s", uid, base, cur["sv"]); return {"stale": 1}
@@ -1281,6 +1285,7 @@ STAR_ITEMS = {  # item: (звёзды, название, описание)
 }
 
 def has_noads(c, uid): return c.execute("SELECT 1 FROM payments WHERE uid=? AND item='noads'", (uid,)).fetchone() is not None
+def noads_of(c, uid): return has_noads(c, uid) or c.execute("SELECT 1 FROM noads WHERE uid=?", (uid,)).fetchone() is not None   # куплено или выдано вами - это навсегда, не зависит от сохранений и сброса сезона
 
 # ---------------------------------------------------------------- звёзды: пополнение баланса и «звёздная крутка» (единственные номера)
 STAR_RATE = int(os.environ.get("STAR_RATE", "1000000"))   # сколько сум даём за 1 ⭐ (можно поменять в настройках Render: STAR_RATE)

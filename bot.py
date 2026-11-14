@@ -579,6 +579,43 @@ async def audit(u, ctx):   # /audit - сверка звёзд всех игро�
     await u.message.reply_text("Не сходится у %d игроков:\n%s\n\nЕсли это старые расхождения (до журнала) — /audit fix" % (len(bad), "\n".join("ID %s: баланс %d ⭐, журнал %d ⭐" % x for x in bad[:30])))
 
 @admin
+async def plate(u, ctx):   # /plate ТЕКСТ - у кого закреплён Мифик/Секретный номер (например /plate 002)
+    q = " ".join(ctx.args).strip()
+    if not q: return await u.message.reply_text("Формат: /plate 002  (часть номера)")
+    c = db(); rows = c.execute("SELECT key,owner,ts FROM uniq WHERE key LIKE ? ORDER BY ts DESC LIMIT 15", ("%" + q + "%",)).fetchall()
+    if not rows: return await u.message.reply_text("Закреплённых номеров с «%s» нет. Значит, такой номер сейчас ни за кем не числится." % q)
+    out = []
+    for r in rows:
+        nm = c.execute("SELECT name FROM users WHERE id=?", (r["owner"],)).fetchone()
+        out.append("%s → владелец ID %s (%s), с %s" % (r["key"], r["owner"], (nm["name"] if nm else "?"), time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600))))
+    await u.message.reply_text("Закреплённые номера:\n" + "\n".join(out))
+
+@admin
+async def wlog_cmd(u, ctx):   # /wlog ID - последние операции со звёздами игрока (откуда пришли, куда ушли)
+    try: uid = int(ctx.args[0])
+    except Exception: return await u.message.reply_text("Формат: /wlog ID")
+    c = db(); rows = c.execute("SELECT d,why,ts FROM wlog WHERE uid=? ORDER BY ts DESC LIMIT 25", (uid,)).fetchall()
+    bal = c.execute("SELECT COALESCE(stars,0) FROM users WHERE id=?", (uid,)).fetchone()
+    if not rows: return await u.message.reply_text("Операций со звёздами у ID %d нет." % uid)
+    out = ["%s %+d ⭐ · %s" % (time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600)), r["d"], r["why"]) for r in rows]
+    await u.message.reply_text("Звёзды ID %d, сейчас: %d ⭐\nПоследние операции:\n%s" % (uid, bal[0] if bal else 0, "\n".join(out)))
+
+@admin
+async def player_cmd(u, ctx):   # /player ID - сводка по игроку: номера, машины, баланс, продажи, крутки, звёзды
+    try: uid = int(ctx.args[0])
+    except Exception: return await u.message.reply_text("Формат: /player ID")
+    c = db(); r = c.execute("SELECT state,stars,name,last_seen FROM users WHERE id=?", (uid,)).fetchone()
+    if not r or not r["state"]: return await u.message.reply_text("Игрока с ID %d нет." % uid)
+    st = json.loads(r["state"]); col = [p for p in (st.get("col") or []) if isinstance(p, dict)]
+    cars = [x for x in (st.get("cars") or []) if isinstance(x, dict)]; oncar = [x for x in cars if isinstance(x.get("pl"), dict)]
+    spins = c.execute("SELECT COUNT(*) FROM wlog WHERE uid=? AND d<0 AND why LIKE '%spin%'", (uid,)).fetchone()[0]
+    hist = c.execute("SELECT ts,col,cars FROM state_hist WHERE uid=? ORDER BY ts", (uid,)).fetchall()
+    h0 = ("\nПервый снимок: %s, номеров %d" % (time.strftime("%d.%m %H:%M", time.localtime(hist[0]["ts"] + 5 * 3600)), len(json.loads(hist[0]["col"])) + sum(1 for x in json.loads(hist[0]["cars"]) if isinstance(x, dict) and x.get("pl")))) if hist else "\nСнимков нет"
+    await u.message.reply_text(
+        "👤 %s (ID %d), уровень %s\nБаланс: %s сум\nЗвёзды: %d ⭐\nНомеров в коллекции: %d\nНомеров на машинах: %d\nВсего номеров: %d\nМашин: %d\nПродано за всё время: %s\nКруток: %s\nЗвёздных круток по журналу: %d%s" % (
+            r["name"], uid, st.get("lv"), format(int(st.get("bal") or 0), ","), r["stars"] or 0, len(col), len(oncar), len(col) + len(oncar), len(cars), st.get("sold", 0), st.get("sp", 0), spins, h0))
+
+@admin
 async def income(u, ctx):   # /income - показать; /income on|off; /income rate ТИР СУМ; /income car ТИП МНОЖ; /income cap ЧАСЫ
     c = db(); cf = income_cfg(c); a = [x.lower() for x in ctx.args]; err = ""
     try:
@@ -636,6 +673,6 @@ app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("restore", restore), ("audit", audit), ("post", post), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("restore", restore), ("audit", audit), ("plate", plate), ("wlog", wlog_cmd), ("player", player_cmd), ("post", post), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
