@@ -120,7 +120,7 @@ h3{margin:14px 2px 8px;font-size:13px;color:var(--mut);text-transform:uppercase;
  <div class="res" id="res"></div>
  <div class="modes" id="modes"></div><div class="sel seg"><button id="k0" class="on">Физ. лицо</button><button id="k1">Фирма</button></div>
  <div class="sel"><button id="rb">📍 Любой регион</button><button id="bn">🎁 Бонус дня</button></div>
- <button class="go" id="go"></button><button id="xgo" hidden><span class="xst">★</span><span><b>Звёздная крутка</b><small>Секретные AAA · SBA · UZB и Мифик XXX · OOO · LJA…</small></span><em>›</em></button><div id="act" hidden><button id="sv"></button><button id="kp">🚗 Оставить в гараже</button></div><div class="box" id="xsp" hidden></div>
+ <button class="go" id="go"></button><div id="act" hidden><button id="sv"></button><button id="kp">🚗 Оставить в гараже</button></div><button id="xgo" hidden><span class="xst">★</span><span><b>Звёздная крутка</b><small>Секретные AAA · SBA · UZB и Мифик XXX · OOO · LJA…</small></span><em>›</em></button><div class="box" id="xsp" hidden></div>
 </div>
 <input type="hidden" id="rg" value=""><div id="sh" class="sheet" hidden></div><div id="rw" class="sheet" hidden></div><div id="v1" hidden><h3>Машины</h3><div class="list" id="clist"></div><h3>Номера</h3><div class="list" id="list"></div></div>
 <div id="v2" hidden>
@@ -157,7 +157,7 @@ var pend=null;function jit(k){var h=0;for(var i=0;i<k.length;i++)h=(h*31+k.charC
 function nr(v,k){var j=jit(k),r=Math.round(v*(.94+j*.12)/100)*100;if(r%1000===0)r+=100*(1+Math.floor(j*8));return r}
 function pmul(k,t){var j=jit(k),j2=jit(k+"~"),m;if(t==2){return j<.7?.95+j2*.35:j<.95?1.3+j2*.6:1.9+j2*1.6}if(j<.7)m=.5+j2*.6;else if(j<.9)m=1.1+j2*.7;else if(j<.975)m=1.8+j2*1.2;else m=3+j2*4;return m*.87}
 function nrp(v,k,t){var r=Math.round(v*pmul(k,t)/100)*100;if(r%1000===0)r+=100*(1+Math.floor(jit(k+"#")*8));return Math.max(r,1100)}
-function val(p){var t=tier(p),kk=""+p.k+p.r+(p.a||"")+p.d+p.z;if(isPM(p))return (p.m||1)*nr(VAL[4]*.5*.8*sm(),kk);if(t>=3){var rm=RM[p.r]||1;if(t>=4&&p.r!="01")rm=Math.min(rm,1);return (p.m||1)*nr(VAL[t]*rm*.8*sm(),kk)}return (p.m||1)*nrp((t==2?T2B*(1+((RM[p.r]||1)-1)*.5):VAL[t]*(RM[p.r]||1)*.8)*sm(),kk,t)}var T2B=860000;function nfmt(n){n=Math.round(+n)||0;var t=String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g,"\u00a0");return n<0?"-"+t:t}
+function val(p){var t=tier(p),kk=""+p.k+p.r+(p.a||"")+p.d+p.z;if(t>=3){var rm=RM[p.r]||1;if(t>=4&&p.r!="01")rm=Math.min(rm,1);return (p.m||1)*nr(VAL[t]*rm*.8*sm(),kk)}return (p.m||1)*nrp((t==2?T2B*(1+((RM[p.r]||1)-1)*.5):VAL[t]*(RM[p.r]||1)*.8)*sm(),kk,t)}var T2B=860000;function nfmt(n){n=Math.round(+n)||0;var t=String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g,"\u00a0");return n<0?"-"+t:t}
 function sh(n){return nfmt(n)}
 var actT=0;function showAct(){actT=Date.now();$("go").hidden=true;$("act").hidden=false;$("sv").textContent="💰 Продать · "+nfmt(val(pend))}
 function done(sell){if(sell&&pend&&isSp(pend)){askSell(pend,function(){done0(1)});return}done0(sell)}
@@ -581,7 +581,7 @@ var SX={rate:1000000,min:50,max:5000,spin:25,packs:[1,5,10],bonus:[[1000,25],[25
 function sxLoad(){if(SXL)return;SXL=1;api("/api/stars",{}).then(function(j){if(j&&j.rate){SX=j;if(sub4=='s')draw4()}}).catch(function(){SXL=0})}
 function sxSum(n){var b=0;(SX.bonus||[]).forEach(function(x){if(!b&&n>=x[0])b=x[1]});return Math.floor(n*SX.rate*(100+b)/100)}
 function sxBon(n){var b=0;(SX.bonus||[]).forEach(function(x){if(!b&&n>=x[0])b=x[1]});return b}
-var SXR="";function sxSel(){return '<select class="inp" data-sxr="1" style="margin:8px 0;width:100%"><option value="">🎲 Любой регион</option>'+RK.map(function(r){return '<option value="'+r+'"'+(SXR==r?' selected':'')+'>'+r+' · '+REG[r]+'</option>'}).join('')+'</select><div style="font-size:11px;color:var(--mut);margin-bottom:6px">Мифик-серии XXX · LJA · OOO · OUU · UOO · UZZ · UZD · OZB — фирма, любой регион. Секретные SBA и AAA — только 25 и 40, UZB и PAA — 25, 40 и 01.</div>'}
+var SXR="";function sxSel(){return '<select class="inp" data-sxr="1" style="margin:8px 0;width:100%"><option value="">🎲 Любой регион</option>'+RK.map(function(r){return '<option value="'+r+'"'+(SXR==r?' selected':'')+'>'+r+' · '+REG[r]+'</option>'}).join('')+'</select><div style="font-size:11px;color:var(--mut);margin-bottom:6px">SBA и AAA — регионы 25 и 40, UZB и PAA — 25, 40, 01</div>'}
 document.addEventListener("change",function(e){var t=e.target;if(t&&t.dataset&&t.dataset.sxr){SXR=t.value;var L=document.querySelectorAll("[data-sxr]");for(var i=0;i<L.length;i++)L[i].value=SXR}});var SHI="spin1",SEAS=null;
 function shopItems(){var L=[];SX.packs.forEach(function(n){L.push(["spin"+n,"🎰 Звёздная крутка ×"+n,n*SX.spin])});L.push(["b50","🍀 Удача ×2 · 2 часа",50],["b100","⚡ Набор: удача ×2 + опыт ×2 + продажа +25% · 2 часа",100],["p500","🎯 Любой номер на выбор",500]);if(!st.noads)L.push(["noads","🚫 Убрать рекламу навсегда",99]);var D=window.SEAS&&SEAS.deal;if(D&&!D.used)L.forEach(function(x){if(x[0]==D.i){x[1]="🔥 −"+D.pct+"% · "+x[1];x[2]=D.p}});return L}
 function starsX(){sxLoad();var it=shopItems(),cur=it.filter(function(x){return x[0]==SHI})[0]||it[0];
@@ -596,7 +596,7 @@ function buyInv(b){PENDSP=b.item=="spin"?1:0;api("/api/invoice",b).then(openInv)
 
 var _sbf=setBal;setBal=function(to){try{var e=$("bal"),av=e.parentNode.clientWidth||150,len=fmt(Math.max(to,shown||0)).length,fs=Math.max(12,Math.min(24,Math.floor(av/(len*.62))));if(e.dataset.fs!=fs){e.dataset.fs=fs;e.style.fontSize=fs+"px"}}catch(x){}_sbf(to)};
 var XK="",SXP=1;
-function xspDraw(){var el=$("xsp");if(!el)return;var xg=$("xgo");if(!(typeof TGD!="undefined"&&TGD)){el.hidden=true;if(xg)xg.hidden=true;return}el.hidden=false;if(xg){xg.hidden=false;if(!xg.onclick)xg.onclick=function(){el.scrollIntoView({behavior:"smooth",block:"start"})}}sxLoad();var k=SX.spin+"|"+SX.packs.join(",")+"|"+SXP+"|"+SX.secret;if(k!=XK){XK=k;el.innerHTML='<div class="xsh"><span class="xst">★</span><div><b>Звёздная крутка</b><small>только единственные номера — таких больше нет ни у кого</small></div></div><div class="xcl">Секретный · '+SX.secret+'%</div><div class="xch">'+["AAA","SBA","UZB"].map(function(z){return'<i class="sx">'+z+'</i>'}).join("")+'</div><div class="xcl">Мифик · фирма · '+SX.mythic+'%</div><div class="xch">'+MYS.concat(["777"]).map(function(z){return'<i>'+z+'</i>'}).join("")+'</div><div style="font-size:12px;color:var(--mut);margin:6px 0 4px">PAA '+(SX.paa||0)+'% · каждый номер на свете один</div><div class="pkb" style="margin:0 0 6px">★ Номера за звёзды остаются навсегда — даже в новом сезоне</div>'+sxSel()+'<div class="xr">'+SX.packs.map(function(n){return '<button data-xs="'+n+'"'+(n==SXP?' class="go2"':'')+'>×'+n+' · '+n*SX.spin+' ⭐</button>'}).join("")+'</div><button class="xbuy" data-xb="1">🎰 Крутить ×'+SXP+' · '+SXP*SX.spin+' ⭐</button><button class="go" data-xp="1" style="margin-top:10px;padding:12px;font-size:15px;width:100%">🎯 Купить любой номер · 500 ⭐</button><div style="font-size:12px;color:var(--mut);margin:4px 0 0;text-align:center">Физ. лицо или фирма, любой регион и цифры</div><div class="row" style="margin-top:10px"><span>⭐ Звёзды: <b id="xs"></b></span><button data-xw="1" class="xsm">+ Пополнить ⭐</button></div><div class="row" style="margin-top:8px"><span>💰 Баланс: <b id="xb"></b></span><button data-xt="1" class="xsm">Обменять ⭐ на сум</button></div>'}var b=$("xb");if(b)b.textContent=fmt(st.bal);b=$("xs");if(b)b.textContent=nfmt(STARS)+" ⭐"}
+function xspDraw(){var el=$("xsp");if(!el)return;var xg=$("xgo");if(!(typeof TGD!="undefined"&&TGD)){el.hidden=true;if(xg)xg.hidden=true;return}el.hidden=false;if(xg){xg.hidden=false;if(!xg.onclick)xg.onclick=function(){el.scrollIntoView({behavior:"smooth",block:"start"})}}sxLoad();var k=SX.spin+"|"+SX.packs.join(",")+"|"+SXP+"|"+SX.secret;if(k!=XK){XK=k;el.innerHTML='<div class="xsh"><span class="xst">★</span><div><b>Звёздная крутка</b><small>только единственные номера — таких больше нет ни у кого</small></div></div><div class="xcl">Секретный · '+SX.secret+'%</div><div class="xch">'+["AAA","SBA","UZB"].map(function(z){return'<i class="sx">'+z+'</i>'}).join("")+'</div><div class="xcl">Мифик · фирма · '+SX.mythic+'%</div><div class="xch">'+MYS.concat(["777"]).map(function(z){return'<i>'+z+'</i>'}).join("")+'</div><div style="font-size:12px;color:var(--mut);margin:6px 0 4px">PAA '+(SX.paa||0)+'% · каждый номер на свете один</div><div class="pkb" style="margin:0 0 6px">★ Номера за звёзды — навсегда, даже в новом сезоне</div>'+sxSel()+'<div class="xr">'+SX.packs.map(function(n){return '<button data-xs="'+n+'"'+(n==SXP?' class="go2"':'')+'>×'+n+' · '+n*SX.spin+' ⭐</button>'}).join("")+'</div><button class="xbuy" data-xb="1">🎰 Крутить ×'+SXP+' · '+SXP*SX.spin+' ⭐</button><button class="go" data-xp="1" style="margin-top:10px;padding:12px;font-size:15px;width:100%">🎯 Купить любой номер · 500 ⭐</button><div style="font-size:12px;color:var(--mut);margin:4px 0 0;text-align:center">Физ. лицо или фирма, любой регион и цифры</div><div class="row" style="margin-top:10px"><span>⭐ Звёзды: <b id="xs"></b></span><button data-xw="1" class="xsm">+ Пополнить ⭐</button></div><div class="row" style="margin-top:8px"><span>💰 Баланс: <b id="xb"></b></span><button data-xt="1" class="xsm">Обменять ⭐ на сум</button></div>'}var b=$("xb");if(b)b.textContent=fmt(st.bal);b=$("xs");if(b)b.textContent=nfmt(STARS)+" ⭐"}
 var WBUSY=false;
 function starSpin(){if(WBUSY)return;var n=SXP,price=n*SX.spin,DL=window.SEAS&&SEAS.deal;if(DL&&!DL.used&&DL.i=="spin"+n)price=DL.p;if(STARS<price){toast("Не хватает ⭐ — пополните звёздный баланс");openWT(price-STARS);return}WBUSY=true;PENDSP=0;api("/api/wbuy",{item:"spin",n:n,reg:SXR}).then(function(r){WBUSY=false;setStars(r.stars);try{if(DL&&DL.i=="spin"+n&&!SXR)DL.used=true}catch(e){}spinWait("Крутим ваш единственный номер…")}).catch(function(e){WBUSY=false;toast(e.message)})}
 $("xsp").onclick=function(e){var b=e.target.closest("button");if(!b)return;if(b.dataset.xs){SXP=+b.dataset.xs;XK="";xspDraw()}else if(b.dataset.xb)starSpin();else if(b.dataset.xp)openPP();else if(b.dataset.xw)openWT(0);else if(b.dataset.xt){tab(4);var t=document.querySelector("#s4 [data-s=s]");if(t)t.click();else{sub4="s";draw4()}}};
@@ -2272,6 +2272,32 @@ h3:before{content:"";width:16px;height:4px;border-radius:3px;background:linear-g
 .sheet>*{animation:up7s .3s cubic-bezier(.2,1.2,.4,1)}
 @keyframes up7s{from{transform:translateY(40px);opacity:0}}
 </style>
+<style id="up9">
+/* ===== компактнее: меньше отступов у кнопок и карточек ===== */
+.top{padding:5px 6px 5px 12px!important;margin-bottom:8px!important;border-radius:18px}
+.top .pill,.top button{min-height:34px}
+.box{padding:9px 12px!important;margin-bottom:8px!important}
+.chips{margin-bottom:6px}.chip{padding:6px 10px!important;font-size:12px!important}
+.stage{min-height:190px!important;padding:24px 8px 20px!important;border-radius:24px!important}
+.res{min-height:34px!important}
+.modes{gap:6px!important;margin:8px 0!important}
+.md{padding:8px 3px!important;border-radius:16px!important}
+.md b{font-size:13px!important}.md small{font-size:11px;margin-top:1px}.md i{display:none!important}
+.sel{gap:6px!important;margin:6px 0!important}
+.sel button{padding:9px 6px!important;font-size:13.5px!important;border-radius:14px!important;min-height:0!important}
+#go{padding:12px!important;font-size:16px!important;border-radius:16px!important}
+#xgo span:not(.xst){min-width:0;flex:1}.bal{flex:1;min-width:0}.top .pill{padding-left:9px!important;padding-right:9px!important}#xgo small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#xgo{padding:7px 12px!important;margin-top:8px!important;border-radius:14px!important}#xgo .xst{width:28px;height:28px;font-size:17px}#xgo b{font-size:14px}
+#xsp{padding:11px 12px!important}.xst{width:36px;height:36px;font-size:22px}.xsh b{font-size:15.5px}
+#xsp .xr button{padding:9px 4px!important;font-size:13px!important}
+#xsp .xbuy,#xsp .go{padding:11px!important;font-size:15px!important}
+.xch i{padding:3px 7px;font-size:11px}
+.nav{padding:4px!important;border-radius:22px!important}.nav button{padding:5px 2px 4px!important;font-size:10.5px!important}.nav button .ic{width:21px!important;height:21px!important}
+body{padding-bottom:96px!important}
+.cd{padding:8px 4px!important}.cd small{font-size:11px}
+.seg4 button{padding:8px 12px!important;font-size:13px}
+.car{padding:10px!important;gap:8px!important}.car .b button{padding:8px!important;font-size:12.5px!important}
+.it{padding:9px 10px!important}
+</style>
 <style id="up5">
 /* ===== апгрейд-пак: двухцветные иконки, эффекты крутки, полировка ===== */
 .ic.du svg{fill:color-mix(in srgb,currentColor 22%,transparent)}
@@ -2309,6 +2335,9 @@ h3:before{content:"";width:16px;height:4px;border-radius:3px;background:linear-g
 @media (prefers-reduced-motion:reduce){.stage.spin0,.stage.spin0:after,#go:after{animation:none!important}}
 </style>
 <script>(function(){var d=document.createElement("div");d.id="bgfx";d.innerHTML="<i></i><i></i><i></i><b></b><u></u><em></em><s></s>";document.body.insertBefore(d,document.body.firstChild)})();</script>
+<script>(function(){var a=document.getElementById("act"),g=document.getElementById("xgo");if(!a)return;
+/* после крутки кнопки «Продать / Оставить» всегда на виду: прокручиваем к ним, звёздную кнопку временно прячем */
+new MutationObserver(function(){var on=!a.hidden;if(on){setTimeout(function(){var r=a.getBoundingClientRect(),nav=document.querySelector(".nav"),nb=nav?nav.getBoundingClientRect().top:innerHeight;if(r.bottom>nb-8||r.top<60)window.scrollBy({top:r.bottom-(nb-16),behavior:"smooth"})},350)}}).observe(a,{attributes:true,attributeFilter:["hidden"]})})();</script>
 <script id="up5s">(function(){"use strict";
 var st=document.getElementById("stage");if(!st||!window.requestAnimationFrame)return;
 var cv=document.createElement("canvas");cv.id="sfxc";document.body.appendChild(cv);
