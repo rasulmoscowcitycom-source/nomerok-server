@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS car_tune(uid INT,cid TEXT,s INT DEFAULT 0,su INT DEFA
 CREATE INDEX IF NOT EXISTS ix_ctcid ON car_tune(cid);
 CREATE TABLE IF NOT EXISTS prof(uid INTEGER PRIMARY KEY,plate TEXT,frame TEXT);
 CREATE TABLE IF NOT EXISTS cosm(uid INT,k TEXT,ts INT,PRIMARY KEY(uid,k));
+CREATE TABLE IF NOT EXISTS plog(uid INT,k TEXT,why TEXT,ts INT);
+CREATE INDEX IF NOT EXISTS ix_plog ON plog(k);
+CREATE INDEX IF NOT EXISTS ix_plog_u ON plog(uid,ts);
+CREATE TABLE IF NOT EXISTS paidpl(uid INT,k TEXT,ts INT,PRIMARY KEY(uid,k));
 CREATE TABLE IF NOT EXISTS noads(uid INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS gifted(uid INTEGER PRIMARY KEY,ts INT);
 CREATE TABLE IF NOT EXISTS state_hist(uid INT,ts INT,col TEXT,cars TEXT);
@@ -235,6 +239,8 @@ def notify(uid, text, btn="🎰 Открыть игру"):
 
 # ---------------------------------------------------------------- единственные экземпляры: Мифик и Секретный номера есть только у одного игрока
 SPSER = {"UZB", "AAA", "SBA"}
+PMSER = {"OUZ", "UMO", "VSB", "VSC", "PPP", "APC", "KFA", "KGA", "QFA"}   # выпадают Мификом в Премиум-крутке (тройные цифры)
+MYSER = {"XXX", "LJA", "OOO", "OUU", "UOO", "UZZ", "UZD", "OZB"}   # фирменные серии-Мифик: выпадают только в крутке за звёзды
 SPX = [(1, "879", "MEA", ""), (1, "762", "MMA", ""), (1, "500", "SOO", ""), (0, "777", "ZZ", "Z"), (0, "001", "OO", "O")]
 SSX = {"PAA": 4, "PSS": 4, "PPP": 3, "APC": 3, "TSS": 3, "TST": 3, "ZDF": 3, "DXA": 2, "FVV": 2, "VSB": 2, "VSC": 2, "VSF": 2, "VSD": 2, "VSG": 2, "VSV": 2, "PSF": 2,
        "TTA": 1, "TTB": 1, "TTC": 1, "TTD": 1, "TTE": 1, "TTF": 1, "TTG": 1}
@@ -244,6 +250,8 @@ def tier_py(p):  # то же, что tier() в игре
     except Exception: return 0
     if r == "01" and any(x[0] == k and x[1] == d and x[2] == z and x[3] == a for x in SPX): return 5
     if k and (z in SPSER or (r == "01" and d == "007" and z == "AUB")): return 5
+    if k and z in MYSER: return 4
+    if k and z in PMSER and len(d) == 3 and d[0] == d[1] == d[2]: return 4   # премиум-серии с тройными цифрами = Мифик
     if k and z in SSX: return SSX[z]
     if len(d) != 3 or len(z) < 2: return 0
     sc = 0
@@ -257,6 +265,9 @@ def tier_py(p):  # то же, что tier() в игре
 
 def ukey(p): return "%s|%s|%s|%s|%s" % (p.get("k"), p.get("r"), p.get("a") or "", p.get("d"), p.get("z"))
 def is_uniq(p): return isinstance(p, dict) and tier_py(p) >= 4
+def mark_paid(c, uid, p):   # номер получен за звёзды (или TON): при новом сезоне он останется
+    try: c.execute("INSERT OR IGNORE INTO paidpl(uid,k,ts) VALUES(?,?,?)", (uid, ukey(p), int(time.time())))
+    except Exception: log.exception("mark_paid")
 
 def need_own(c, uid, v):
     """Единственный номер (Мифик/Секретный) можно выставить/поставить в дуэль только если он ваш по базе:
@@ -635,7 +646,7 @@ def load(b):
     c.execute("INSERT INTO users(id,name,first_seen,last_seen) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=?,last_seen=?", (uid, name, now, now, name, now))
     if not existed: ref_credit(c, uid)
     row = c.execute("SELECT state,sv FROM users WHERE id=?", (uid,)).fetchone()
-    head = json.dumps({"noads": 1 if noads_of(c, uid) else 0, "sv": (row["sv"] or 0) if row else 0, "uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}, separators=(",", ":"))
+    head = json.dumps({"pk": [r[0] for r in c.execute("SELECT k FROM paidpl WHERE uid=? LIMIT 800", (uid,))], "noads": 1 if noads_of(c, uid) else 0, "sv": (row["sv"] or 0) if row else 0, "uid": uid, "gifts": gifts_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "rid": get_rid(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}, separators=(",", ":"))
     c.commit()
     state = row["state"] if row and row["state"] else "null"   # состояние уже хранится как JSON - вставляем как есть
     if state != "null" and ('"z"' in state):
@@ -657,6 +668,20 @@ def poll(b):   # один лёгкий запрос вместо четырёх:
         c.execute("UPDATE users SET last_seen=? WHERE id=?", (int(t), uid)); c.commit()
     return {"gifts": gifts_of(c, uid), "offers": offers_of(c, uid), "ref": {"n": ref_count(c, uid), "bot": BOT_USERNAME}, "ev": event_of(c), "stars": stars_of(c, uid), "season": season_info(c, uid)}
 
+def _uniq_free_for(c, k, owner):
+    """Можно ли отдать единственный номер другому игроку: он никем не занят (0) или «владелец» его на самом деле уже не имеет."""
+    if owner == 0: return True
+    if owner < 0: return False   # в залоге: аукцион, гонка, NFT, TON-рынок - вернётся владельцу сам
+    r = c.execute("SELECT state FROM users WHERE id=?", (owner,)).fetchone()
+    try: so = json.loads(r["state"]) if r and r["state"] else {}
+    except Exception: return False
+    for p in _plates_of(so):
+        try:
+            if ukey(clean_plate(p)) == k: return False
+        except HTTPException: pass
+    if c.execute("SELECT 1 FROM gifts WHERE uid=? AND data LIKE ? LIMIT 1", (owner, '%"' + k.split("|")[3] + '"%')).fetchone(): return False   # номер ещё едет к нему подарком
+    return True
+
 def uniq_guard(c, uid, st):
     """Единственные номера (Мифик/Секретный): у каждого - ровно один владелец.
     Чужой/уже занятый номер в состоянии игрока удаляется, свободный - закрепляется за ним."""
@@ -670,11 +695,19 @@ def uniq_guard(c, uid, st):
         c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (k, uid, int(time.time())))
         if c.execute("SELECT changes()").fetchone()[0] == 1 and uid not in HIDDEN and lim_hit("ugd", uid, 1, UCL_DAY * 4):
             c.execute("DELETE FROM uniq WHERE key=? AND owner=?", (k, uid)); dups.append(pp)
+            c.execute("INSERT INTO plog(uid,k,why,ts) VALUES(?,?,?,?)", (uid, k, "убран: лимит новых Мифик/Секретных за сутки", int(time.time())))
             if not lim_hit("ucl_al", uid, 1, 1): alert_admins("⚠️ Игрок ID %s: в сохранении больше %d новых Мифик/Секретных номеров за сутки (возможный чит). Лишние удалены." % (uid, UCL_DAY * 4))
             return False
         row = c.execute("SELECT owner FROM uniq WHERE key=?", (k,)).fetchone()
+        if row and row["owner"] != uid and _uniq_free_for(c, k, row["owner"]):   # номер ни у кого реально не лежит - оставляем игроку, а не удаляем
+            c.execute("UPDATE uniq SET owner=?,ts=? WHERE key=? AND owner=?", (uid, int(time.time()), k, row["owner"]))
+            c.execute("INSERT INTO plog(uid,k,why,ts) VALUES(?,?,?,?)", (uid, k, "оставлен игроку: за %s числился, но у него номера нет" % ("никем" if row["owner"] == 0 else "ID %s" % row["owner"]), int(time.time())))
+            row = None
         if row and row["owner"] != uid:
-            dups.append(pp); return False
+            dups.append(pp)
+            if not lim_hit("plog", uid * 7 + hash(k) % 1000, 1, 1):
+                c.execute("INSERT INTO plog(uid,k,why,ts) VALUES(?,?,?,?)", (uid, k, "убран: числится за %s" % ({0: "никем (продан/сожжён)", -1: "залогом (аукцион/гонка)", -2: "NFT", -3: "TON-рынком"}.get(row["owner"], "ID %s" % row["owner"])), int(time.time())))
+            return False
         if k in seen:            # второй такой же номер у самого владельца
             st["_own"] += 1; return False
         seen.add(k)
@@ -729,6 +762,13 @@ def save(b):
     if not st.get("cl2") and isinstance(st.get("cars"), list):   # старый клиент: Бибиша теперь только по команде, лишние убираем
         st["cars"] = [x for x in st["cars"] if not (isinstance(x, dict) and "Бибиша" in str(x.get("n", "")))]
     cur = c.execute("SELECT state,sv FROM users WHERE id=?", (uid,)).fetchone()
+    wid = plw_id(c)
+    if wid and str(st.get("plw") or "") != wid:
+        try: srv_w = str((json.loads(cur["state"]) if cur and cur["state"] else {}).get("plw") or "")
+        except Exception: srv_w = ""
+        if srv_w == wid:   # на сервере уже новый сезон, а игра открыта ещё с прошлого: не даём вернуть старые номера
+            log.warning("сохранение из прошлого сезона отклонено %s", uid); return {"stale": 1}
+        st["plw"] = wid   # новый игрок или ещё не задетый сбросом - просто помечаем
     if st.get("noads"): c.execute("INSERT OR IGNORE INTO noads(uid) VALUES(?)", (uid,))
     elif noads_of(c, uid): st["noads"] = 1
     base = b.get("base")
@@ -1081,7 +1121,7 @@ def tl_buy(b):
     tspend(c, uid, r["price"], "buy")
     if c.execute("UPDATE ton_lot SET status='sold',buyer=? WHERE id=? AND status='open'", (uid, lid)).rowcount != 1:
         c.rollback(); raise HTTPException(400, "Лот уже продан или снят")
-    fee = ton_fee(r["price"]); tadd(c, r["seller"], r["price"] - fee, "sale"); gift(c, uid, {"t": "plate", "v": json.loads(r["plate"])}); c.commit()
+    fee = ton_fee(r["price"]); tadd(c, r["seller"], r["price"] - fee, "sale"); gift(c, uid, {"t": "plate", "v": json.loads(r["plate"])}); mark_paid(c, uid, json.loads(r["plate"])); c.commit()
     notify(r["seller"], "💎 Ваш номер продан за %.2f TON (комиссия %d%%). На балансе +%.2f TON" % (r["price"] / NANO, TON_FEE, (r["price"] - fee) / NANO))
     return {"ok": 1, "ton": ton_of(c, uid)}
 
@@ -1222,6 +1262,26 @@ class CarFiles(StaticFiles):   # фото машин кэшируются в т�
     def file_response(self, *a, **k):
         r = super().file_response(*a, **k); r.headers["Cache-Control"] = "public, max-age=604800"; return r
 
+def _unpack_cars():
+    """Фото машин можно залить одним файлом cars-webp.zip рядом с server.py: при запуске он сам распакуется в папку cars."""
+    d = os.path.join(HERE, "cars"); os.makedirs(d, exist_ok=True)
+    for zn in ("cars-webp.zip", "cars.zip"):
+        zp = os.path.join(HERE, zn)
+        if not os.path.exists(zp): continue
+        try:
+            import zipfile
+            with zipfile.ZipFile(zp) as z:
+                n = 0
+                for nm in z.namelist():
+                    base = os.path.basename(nm)
+                    if not base or not base.lower().endswith((".webp", ".jpg", ".png")) or "/" in base or ".." in base: continue
+                    out = os.path.join(d, base)
+                    if os.path.exists(out) and os.path.getsize(out) == z.getinfo(nm).file_size: continue
+                    with z.open(nm) as src, open(out, "wb") as dst: dst.write(src.read())
+                    n += 1
+            log.info("фото машин: распаковано %d из %s", n, zn)
+        except Exception: log.exception("распаковка %s", zn)
+_unpack_cars()
 app.mount("/cars", CarFiles(directory=os.path.join(HERE, "cars")), name="cars")  # фото машин: cars/имя.jpg
 _CI = [0, []]
 
@@ -1229,7 +1289,13 @@ _CI = [0, []]
 def carimgs(b):   # какие фото машин реально лежат в папке cars (игра не просит несуществующие)
     t = time.time()
     if t - _CI[0] > 60:
-        try: _CI[1] = sorted(f[:-4] for f in os.listdir(os.path.join(HERE, "cars")) if f.lower().endswith(".jpg"))
+        try:   # webp (с прозрачным фоном) важнее jpg; игра получает имя с расширением
+            fs = os.listdir(os.path.join(HERE, "cars")); m = {}
+            for ext in (".jpg", ".png", ".webp"):
+                for f in fs:
+                    if f.lower().endswith(ext): m[f[:-len(ext)]] = f
+            _CI[1] = sorted(m.values())
+        except OSError: _CI[1] = []
         except OSError: _CI[1] = []
         _CI[0] = t
     return {"list": _CI[1]}
@@ -1276,7 +1342,7 @@ def event(b):
 REGS = ["01", "10", "20", "25", "30", "40", "50", "60", "70", "75", "80", "85", "90", "95"]
 LETTERS = set("ABCDEFGHJKLMNPRSTUVWXYZ")
 BLOCK = {"PAA", "PSS", "PPP", "APC", "TSS", "TST", "ZDF", "DXA", "FVV", "VSB", "VSC", "VSF", "VSD", "VSG", "VSV", "PSF",
-         "TTA", "TTB", "TTC", "TTD", "TTE", "TTF", "TTG", "UZB", "AAA", "SBA", "AUB"}
+         "TTA", "TTB", "TTC", "TTD", "TTE", "TTF", "TTG", "UZB", "AAA", "SBA", "AUB", "XXX", "LJA", "OOO", "OUU", "UOO", "UZZ", "UZD", "OZB"}
 STAR_ITEMS = {  # item: (звёзды, название, описание)
     "b50": (50, "Удача x2 на 2 часа", "Повышенный шанс на хорошие номера на 2 часа"),
     "b100": (100, "Набор бустов на 2 часа", "Удача x2, опыт x2 и бонус продажи +25% на 2 часа"),
@@ -1293,9 +1359,9 @@ STAR_MIN, STAR_MAX = 50, 5000
 WALLET_MIN, WALLET_MAX = 10, 10000                         # пополнение звёздного баланса
 SA_FEE, SA_MIN = 5, 10                                    # комиссия звёздного аукциона (%) и минимальная стартовая ставка (⭐)                              # пополнение баланса: от 50 ⭐
 STAR_BONUS = [(1000, 25), (250, 10)]                       # от 250 ⭐ +10%, от 1000 ⭐ +25%
-SPIN_PRICE = 15                                            # одна звёздная крутка = 15 ⭐
+SPIN_PRICE = 25                                            # одна звёздная крутка = 25 ⭐
 SPIN_PACKS = (1, 5, 10)
-SPIN_MYTHIC = 0.10                                         # шанс Мифика в крутке за звёзды, остальное - Секретный
+SPIN_MYTHIC = 0.60                                         # шанс Мифика в крутке за звёзды, остальное - Секретный
 SPIN_PAA = 0.03                                            # шанс номера PAA в крутке за звёзды
 SPIN_SAME = 0.05                                           # шанс одинаковых цифр (777) у Секретной спецсерии - такие выпадают только за звёзды
 SPIN_SECRET = 0.10                                         # шанс Секретного номера; иначе Мифик (оба - единственные в игре)
@@ -1322,6 +1388,8 @@ def _pretty(d): return d[0] == d[1] == d[2] or d in ("123", "321", "456", "789",
 SER_REG = {"SBA": ("25", "40"), "AAA": ("25", "40"), "UZB": ("25", "40", "01")}   # где выпадают спецсерии (Джизак, Фергана; UZB ещё Ташкент)
 PAA_REG = ("25", "40", "01")
 
+SER_W = {"SBA": 40, "AAA": 40, "UZB": 20}   # веса секретных спецсерий в крутке за звёзды
+
 def roll_unique(c, uid, reg=""):
     """Крутка за звёзды. Регион можно выбрать (reg), пусто - любой.
     PAA (3%) и Секретный (спецсерии SBA/AAA/UZB) - только в своих регионах: SBA/AAA на 25 и 40, UZB и PAA на 25, 40 и 01.
@@ -1331,10 +1399,10 @@ def roll_unique(c, uid, reg=""):
         for _ in range(400):
             p = {"k": 1, "r": reg or _RND.choice(PAA_REG), "d": "%03d" % _RND.randint(1, 999), "z": "PAA"}
             if tier_py(p) >= 4 and _claim(c, uid, p): return p
-    sers = [z for z in ("SBA", "AAA", "UZB") if not reg or reg in SER_REG[z]]
+    sers = [z for z in SER_W if not reg or reg in SER_REG[z]]
     want_sec = bool(sers) and _RND.random() >= SPIN_MYTHIC
     if want_sec:
-        w = {"SBA": 40, "AAA": 40, "UZB": 20}
+        w = SER_W
         for _ in range(800):
             z = _RND.choices(sers, [w[x] for x in sers])[0]
             r = reg or _RND.choice(SER_REG[z])
@@ -1344,6 +1412,11 @@ def roll_unique(c, uid, reg=""):
                 if _pretty(d): continue
             p = {"k": 1, "r": r, "d": d, "z": z}
             if tier_py(p) == 5 and _claim(c, uid, p): return p
+    for _ in range(600):   # Мифик фирменной серии: XXX, LJA, OOO ... (только фирма, любой регион)
+        if _RND.random() < 0.4: break
+        z = _RND.choice(sorted(MYSER)); d = "%03d" % _RND.randint(1, 999)
+        p = {"k": 1, "r": reg or _RND.choice(_PLR), "d": d, "z": z}
+        if tier_py(p) == 4 and _claim(c, uid, p): return p
     for _ in range(800):   # Мифик (или запасной вариант)
         x = str(_RND.randint(1, 9)); b = _RND.choice(sorted(LETTERS))
         if reg not in ("", "01") or _RND.random() < 0.5: p = {"k": 1, "r": reg or _RND.choice(_PLR), "d": x * 3, "z": b * 3}
@@ -1365,7 +1438,7 @@ def apply_payment(c, d, total, charge):
         st = int(d.get("s", 0))
         if st != total or not (WALLET_MIN <= st <= WALLET_MAX): log.error("платёж wallet: сумма не сходится %s %s", st, total); c.commit(); return None
         wadd(c, uid, st, "topup"); msg = "⭐ Звёздный баланс пополнен на %d ⭐. Тратьте их в игре." % st
-    elif item == "p500": gift(c, uid, {"t": "plate", "v": d["p"]})
+    elif item == "p500": gift(c, uid, {"t": "plate", "v": d["p"]}); mark_paid(c, uid, d["p"])
     elif item == "bal":
         st = int(d.get("s", 0))
         if st != total or not (STAR_MIN <= st <= STAR_MAX): log.error("платёж bal: сумма не сходится %s %s", st, total); c.commit(); return None
@@ -1376,7 +1449,7 @@ def apply_payment(c, d, total, charge):
         got = []
         for _ in range(n):
             p = roll_unique(c, uid, str(d.get("g") or ""))
-            if p: gift(c, uid, {"t": "plate", "v": p, "src": "spin"}); got.append("%s (%s)" % (plate_txt(p), "Секретный" if tier_py(p) >= 5 else "PAA" if p.get("z") == "PAA" else "Мифик"))
+            if p: gift(c, uid, {"t": "plate", "v": p, "src": "spin"}); mark_paid(c, uid, p); got.append("%s (%s)" % (plate_txt(p), "Секретный" if tier_py(p) >= 5 else "PAA" if p.get("z") == "PAA" else "Мифик"))
             else: gift(c, uid, {"t": "bal", "v": SPIN_PRICE * STAR_RATE})   # единственные номера закончились - вернём стоимость сумами
         msg = "🎰 Звёздная крутка! Ваши единственные номера:\n" + "\n".join("🔢 " + x for x in got) + "\nОни уже в игре."
     c.commit()
@@ -1774,6 +1847,65 @@ def rew_text(r):
 COSM_NAME = {"bp_neon": "краска Неон (Battle Pass)", "bp_royal": "краска Королевский (Battle Pass)", "bp_ice": "ледяное пламя (Battle Pass)", "bp_fire": "огненное пламя (Battle Pass)", "chrome": "краска Хром", "gold": "краска Золото", "matte": "краска Мат", "pearl": "краска Перламутр", "candy": "краска Кэнди",
              "fl_blue": "синее пламя", "fl_green": "зелёное пламя", "fl_pink": "розовое пламя", "fl_white": "белое пламя", "fl_gold": "золотое пламя", "frm_gold": "золотая рамка профиля", "frm_neon": "неоновая рамка профиля", "frm_ice": "ледяная рамка профиля", "frm_fire": "огненная рамка профиля", "frm_royal": "королевская рамка профиля", "ex_turbo": "турбо-выхлоп (+1% скорость)", "ex_inferno": "инферно-выхлоп (+2% скорость)"}
 
+def _paid_keys(c, uid, legacy):
+    ks = {r[0] for r in c.execute("SELECT k FROM paidpl WHERE uid=?", (uid,))}
+    if legacy:   # до этого обновления номера за звёзды не помечались: у тех, кто платил звёздами за номера, сохраняем их Мифик/Секретные
+        ks.add("*uniq*")
+    return ks
+
+def _keep_pl(p, ks): return isinstance(p, dict) and (ukey(p) in ks or ("*uniq*" in ks and is_uniq(p)))
+
+def strip_season(st, ks):
+    """Убрать из состояния все номера, кроме купленных за звёзды. Машины остаются (без номеров)."""
+    n0 = len([p for p in (st.get("col") or []) if isinstance(p, dict)]); kept = 0
+    st["col"] = [p for p in (st.get("col") or []) if _keep_pl(p, ks)]; kept += len(st["col"])
+    for x in (st.get("cars") or []):
+        if isinstance(x, dict) and isinstance(x.get("pl"), dict):
+            n0 += 1
+            if _keep_pl(x["pl"], ks): kept += 1
+            else: x["pl"] = None
+    if isinstance(st.get("pnd"), dict) and not _keep_pl(st["pnd"], ks): st["pnd"] = None
+    return n0, kept
+
+def plw_id(c):
+    r = c.execute("SELECT v FROM meta WHERE k='plw'").fetchone(); return r[0] if r else ""
+
+def legacy_payers(c):
+    return {r[0] for r in c.execute("SELECT DISTINCT uid FROM wlog WHERE why LIKE 'buy:spin%' OR why LIKE 'buy:p500%' OR why LIKE 'sa-bid%'")} | \
+           {r[0] for r in c.execute("SELECT DISTINCT uid FROM payments WHERE item IN ('spin','p500')")}
+
+def wipe_plan(c):
+    """Сколько номеров удалится и сколько останется (для предпросмотра /newseason)."""
+    leg = legacy_payers(c) if not plw_id(c) else set()
+    tot = kept = pl = 0
+    for r in c.execute("SELECT id,state FROM users").fetchall():
+        try: st = json.loads(r["state"]) if r["state"] else None
+        except Exception: continue
+        if not isinstance(st, dict): continue
+        a, b = strip_season(st, _paid_keys(c, r["id"], r["id"] in leg)); tot += a; kept += b
+        if b: pl += 1
+    return tot, kept, pl
+
+def season_wipe(c):
+    """Новый сезон: номера пропадают у всех, кроме купленных за ⭐ (крутки за звёзды, номер за 500 ⭐, аукцион за ⭐, рынок за TON)."""
+    leg = legacy_payers(c) if not plw_id(c) else set()
+    wid = str(int(time.time())); tot = kept = 0
+    for r in c.execute("SELECT id,state FROM users").fetchall():
+        try: st = json.loads(r["state"]) if r["state"] else None
+        except Exception: continue
+        if not isinstance(st, dict): continue
+        ks = _paid_keys(c, r["id"], r["id"] in leg)
+        if r["id"] in leg:   # уцелевшие номера помечаем оплаченными, чтобы и следующий сезон их сохранил
+            for p in [p for p in (st.get("col") or []) if isinstance(p, dict)] + [x["pl"] for x in (st.get("cars") or []) if isinstance(x, dict) and isinstance(x.get("pl"), dict)]:
+                if _keep_pl(p, ks): mark_paid(c, r["id"], p)
+        a, b = strip_season(st, ks); tot += a; kept += b; st["plw"] = wid
+        keep_u = {ukey(p) for p in (st.get("col") or []) if isinstance(p, dict)} | {ukey(x["pl"]) for x in (st.get("cars") or []) if isinstance(x, dict) and isinstance(x.get("pl"), dict)}
+        for u in c.execute("SELECT key FROM uniq WHERE owner=?", (r["id"],)).fetchall():
+            if u[0] not in keep_u: c.execute("DELETE FROM uniq WHERE key=? AND owner=?", (u[0], r["id"]))
+        c.execute("UPDATE users SET state=?,sv=COALESCE(sv,0)+1 WHERE id=?", (json.dumps(st, separators=(",", ":")), r["id"]))
+    c.execute("DELETE FROM upg_pend"); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('plw',?)", (wid,)); c.commit()
+    return tot, kept
+
 def season_apply(c, P, old, new, days):
     """Новый сезон: у всех сумы = SEASON_BAL (номера и машины остаются), награды за итоги, статистика сезона обнуляется (по новому названию)."""
     now = int(time.time())
@@ -1794,7 +1926,7 @@ def season_apply(c, P, old, new, days):
     c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('season_start',?)", (str(now),)); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('rstat_bf',?)", (new,)); c.commit()
     for uid, x in P.items():   # личные сообщения тем, кто в призах
         if x["hid"] or not (x["wr"] or x["lr"] or x["sr"] or x["tr"] or x["p"] >= 10): continue
-        notify(uid, "🏁 Итоги сезона %s\n%s\nНаграды: %s\n\nНовый сезон %s начался: у всех %s сум, номера и машины остались. Заходи за наградой!" % (
+        notify(uid, "🏁 Итоги сезона %s\n%s\nНаграды: %s\n\nНовый сезон %s начался: у всех %s сум, машины остались, номера — только купленные за ⭐. Заходи за наградой!" % (
             old, "Гонок: %d, побед: %d%s%s" % (x["p"], x["w"], (", место по победам: %d" % x["wr"]) if x["wr"] else "", (", место по уровню: %d" % x["lr"]) if x["lr"] else ""), ", ".join(rew_text(x["rew"])) or "—", new, fnum(SEASON_BAL)))
 
 @api("/api/bp/buy")
@@ -1857,7 +1989,7 @@ def sa_settle(c):
         p = json.loads(a["item"]); nm = plate_txt(p)
         if a["topuid"]:
             fee = a["top"] * SA_FEE // 100; got = a["top"] - fee
-            gift(c, a["topuid"], {"t": "plate", "v": p}); wadd(c, a["seller"], got, "sa-sold:%d" % a["id"])
+            gift(c, a["topuid"], {"t": "plate", "v": p}); mark_paid(c, a["topuid"], p); wadd(c, a["seller"], got, "sa-sold:%d" % a["id"])
             notes.append((a["topuid"], "🏆 Вы выиграли аукцион за ⭐!\n🔢 %s\nСтавка: %d ⭐. Номер уже в вашем гараже." % (nm, a["top"]), "Открыть игру"))
             notes.append((a["seller"], "✅ Ваш номер продан за ⭐!\n🔢 %s\nЦена: %d ⭐. Вам зачислено %d ⭐ (комиссия %d%%)." % (nm, a["top"], got, SA_FEE), "Открыть игру"))
         else:

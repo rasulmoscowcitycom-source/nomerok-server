@@ -3,7 +3,7 @@ import json, time, sqlite3, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 import os
-from server import db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, BOT_USERNAME, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, restore_list, restore_missing, stars_audit, stars_audit_fix, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL, COSM, COSM_NAME, BPC
+from server import wipe_plan, season_wipe, db, gift, wadd, notify, raw_addr, ton_of, tadd, NANO, get_rid, BOT_TOKEN, DB_PATH, REQUIRED_CHANNEL, REQUIRED_URL, BOT_USERNAME, backup_db, db_report, launch_ultra, ads_is_off, ads_cfg, income_cfg, income_save, restore_list, restore_missing, stars_audit, stars_audit_fix, apply_payment, plate_txt, ukey, clean_plate, season_plan, season_apply, SEASON_BAL, COSM, COSM_NAME, BPC
 
 ADMINS = {int(x) for x in os.environ.get("ADMINS", "123456789").split(",") if x.strip()}              # ваш Telegram ID (узнать: @userinfobot)
 URL = os.environ.get("APP_URL", "https://YOUR-DOMAIN/")      # https-адрес, где запущен server.py
@@ -597,18 +597,31 @@ async def plate(u, ctx):   # /plate ТЕКСТ - у кого закреплён 
             hit = [p for p in L if str(p.get("d")) == ks[3] and str(p.get("z")) == ks[4]]
             has = "✅ сейчас у него есть" + (" (на машине)" if any(isinstance(x, dict) and isinstance(x.get("pl"), dict) and str(x["pl"].get("d")) == ks[3] and str(x["pl"].get("z")) == ks[4] for x in (sj.get("cars") or [])) and hit and not any(isinstance(p, dict) and p in (sj.get("col") or []) for p in hit) else "") if hit else "❌ в его коллекции и на машинах этого номера сейчас НЕТ (продан или убран)"
         except Exception: pass
-        out.append("%s → владелец ID %s (%s), с %s\n   %s" % (r["key"], r["owner"], (nm["name"] if nm else "?"), time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600)), has))
+        hist = c.execute("SELECT uid,ts FROM uniq_own WHERE key=? ORDER BY ts", (r["key"],)).fetchall()
+        rm = c.execute("SELECT uid,why,ts FROM plog WHERE k=? ORDER BY ts DESC LIMIT 5", (r["key"],)).fetchall()
+        hx = ("\n   Владельцы по очереди: " + " → ".join("ID %s (%s)" % (h["uid"], time.strftime("%d.%m %H:%M", time.localtime(int(h["ts"]) + 5 * 3600))) for h in hist[-6:])) if hist else ""
+        rx = ("\n   Удаления: " + "; ".join("у ID %s %s (%s)" % (x["uid"], x["why"], time.strftime("%d.%m %H:%M", time.localtime(x["ts"] + 5 * 3600))) for x in rm)) if rm else ""
+        out.append("%s → владелец ID %s (%s), с %s\n   %s%s%s" % (r["key"], r["owner"], (nm["name"] if nm else "?"), time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600)), has, hx, rx))
     await u.message.reply_text("Закреплённые номера:\n" + "\n".join(out))
 
 @admin
 async def wlog_cmd(u, ctx):   # /wlog ID - последние операции со звёздами игрока (откуда пришли, куда ушли)
     try: uid = int(ctx.args[0])
     except Exception: return await u.message.reply_text("Формат: /wlog ID")
-    c = db(); rows = c.execute("SELECT d,why,ts FROM wlog WHERE uid=? ORDER BY ts DESC LIMIT 25", (uid,)).fetchall()
+    c = db(); n = 25
+    try: n = max(5, min(60, int(ctx.args[1])))
+    except Exception: pass
+    big = c.execute("SELECT d,why,ts FROM wlog WHERE uid=? AND ABS(d)>=500 ORDER BY ts DESC LIMIT 5", (uid,)).fetchall()
+    rows = c.execute("SELECT d,why,ts FROM wlog WHERE uid=? ORDER BY ts DESC LIMIT ?", (uid, n)).fetchall()
     bal = c.execute("SELECT COALESCE(stars,0) FROM users WHERE id=?", (uid,)).fetchone()
     if not rows: return await u.message.reply_text("Операций со звёздами у ID %d нет." % uid)
     out = ["%s %+d ⭐ · %s" % (time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600)), r["d"], r["why"]) for r in rows]
-    await u.message.reply_text("Звёзды ID %d, сейчас: %d ⭐\nПоследние операции:\n%s" % (uid, bal[0] if bal else 0, "\n".join(out)))
+    bg = ("\n\nКрупные (от 500 ⭐):\n" + "\n".join("%s %+d ⭐ · %s" % (time.strftime("%d.%m %H:%M", time.localtime(r["ts"] + 5 * 3600)), r["d"], r["why"]) for r in big)) if big else "\n\nКрупных операций (от 500 ⭐) нет."
+    tot = {}
+    for r in c.execute("SELECT d,why FROM wlog WHERE uid=?", (uid,)):
+        k = str(r["why"]).split(":")[0]; t = tot.setdefault(k, [0, 0]); t[0] += r["d"]; t[1] += 1
+    sm = "\n\n📊 ВСЕГО по журналу (откуда и куда ушли звёзды):\n" + "\n".join("%s: %+d ⭐ (%d раз)" % (k, v[0], v[1]) for k, v in sorted(tot.items(), key=lambda x: x[1][0])) + "\nИтого: %+d ⭐ = баланс" % sum(v[0] for v in tot.values())
+    await u.message.reply_text("Звёзды ID %d, сейчас: %d ⭐\nПоследние операции:\n%s%s%s" % (uid, bal[0] if bal else 0, "\n".join(out), bg, sm))
 
 @admin
 async def player_cmd(u, ctx):   # /player ID - сводка по игроку: номера, машины, баланс, продажи, крутки, звёзды
@@ -621,6 +634,8 @@ async def player_cmd(u, ctx):   # /player ID - сводка по игроку: �
     spins = c.execute("SELECT COUNT(*) FROM wlog WHERE uid=? AND d<0 AND why LIKE '%spin%'", (uid,)).fetchone()[0]
     hist = c.execute("SELECT ts,col,cars FROM state_hist WHERE uid=? ORDER BY ts", (uid,)).fetchall()
     h0 = ("\nПервый снимок: %s, номеров %d" % (time.strftime("%d.%m %H:%M", time.localtime(hist[0]["ts"] + 5 * 3600)), len(json.loads(hist[0]["col"])) + sum(1 for x in json.loads(hist[0]["cars"]) if isinstance(x, dict) and x.get("pl")))) if hist else "\nСнимков нет"
+    rmv = c.execute("SELECT k,why,ts FROM plog WHERE uid=? ORDER BY ts DESC LIMIT 8", (uid,)).fetchall()
+    h0 += ("\n\n🧹 Сервер убирал у него номера:\n" + "\n".join("%s · %s · %s" % (time.strftime("%d.%m %H:%M", time.localtime(x["ts"] + 5 * 3600)), x["k"], x["why"]) for x in rmv)) if rmv else "\nСервер у него номера не убирал."
     await u.message.reply_text(
         "👤 %s (ID %d), уровень %s\nБаланс: %s сум\nЗвёзды: %d ⭐\nНомеров в коллекции: %d\nНомеров на машинах: %d\nВсего номеров: %d\nМашин: %d\nПродано за всё время: %s\nКруток: %s\nЗвёздных круток по журналу: %d%s" % (
             r["name"], uid, st.get("lv"), format(int(st.get("bal") or 0), ","), r["stars"] or 0, len(col), len(oncar), len(col) + len(oncar), len(cars), st.get("sold", 0), st.get("sp", 0), spins, h0))
@@ -648,9 +663,11 @@ async def income(u, ctx):   # /income - показать; /income on|off; /incom
 async def newseason(u, ctx):   # /newseason Beta 3 14 - показать итоги и план; /newseason Beta 3 14 CONFIRM - начать новый сезон
     a = list(ctx.args); conf = bool(a) and a[-1] == "CONFIRM"
     if conf: a = a[:-1]
+    keep = bool(a) and a[-1].lower() == "keep"   # /newseason Название ДНИ keep - номера НЕ удалять
+    if keep: a = a[:-1]
     if len(a) < 2 or not a[-1].isdigit():
         return await u.message.reply_text("Новый сезон: /newseason Название ДНИ\nНапример: /newseason Beta 3 14\nБот покажет итоги и что получит каждый. Начать: добавьте CONFIRM в конце.\n\n"
-                                          "Что произойдёт: у ВСЕХ сумы станут %s (номера и машины остаются), топ по победам в гонках, топ по уровню и все, кто играл, получат награды, Battle Pass начнётся заново." % f"{SEASON_BAL:,}".replace(",", " "))
+                                          "Что произойдёт: у ВСЕХ сумы станут %s (машины остаются; номера пропадут, кроме купленных за ⭐; чтобы оставить все номера — добавьте keep перед CONFIRM), топ по победам в гонках, топ по уровню и все, кто играл, получат награды, Battle Pass начнётся заново." % f"{SEASON_BAL:,}".replace(",", " "))
     days = max(1, min(120, int(a[-1]))); name = " ".join(a[:-1])[:24]
     c = db(); old, P = season_plan(c)
     tw = sorted([i for i in P if P[i]["wr"]], key=lambda i: P[i]["wr"])[:10]; tl = sorted([i for i in P if P[i]["lr"]], key=lambda i: P[i]["lr"])[:10]
@@ -664,10 +681,16 @@ async def newseason(u, ctx):   # /newseason Beta 3 14 - показать ито�
         "\n".join("%d. %s — %s сум" % (P[i]["sr"], P[i]["name"], f"{P[i]['sps']:,}".replace(",", " ")) for i in ts_) or "—",
         "\n".join("%d. %s — %d ⭐" % (P[i]["tr"], P[i]["name"], P[i]["stp"]) for i in tt_) or "—",
         part, f"{tot_m:,}".replace(",", " "), tot_s, f"{SEASON_BAL:,}".replace(",", " "))
+    if keep: txt += "\n\n🔢 Номера: остаются у всех (режим keep)."
+    else:
+        wt, wk, wp = wipe_plan(c)
+        txt += "\n\n🔢 Номера: пропадут у всех. Останутся только купленные за ⭐ (крутки за звёзды, номер за 500 ⭐, аукцион за ⭐, рынок за TON).\nСейчас номеров у игроков: %d, останется: %d (у %d игроков). Машины остаются." % (wt, wk, wp)
     if not conf:
-        return await u.message.reply_text(txt + "\n\nЭто только план, ничего не изменено.\nНачать сезон: /newseason %s %d CONFIRM" % (name, days))
+        return await u.message.reply_text(txt + "\n\nЭто только план, ничего не изменено.\nНачать сезон: /newseason %s %d%s CONFIRM" % (name, days, " keep" if keep else ""))
     try: bk = backup_db("newseason")
     except Exception as e: return await u.message.reply_text(f"❌ Не удалось сделать копию базы ({e}). Новый сезон не начат.")
+    if not keep:
+        wt, wk = season_wipe(c); txt += "\n\n🧹 Номера удалены: было %d, осталось %d (купленные за ⭐)." % (wt, wk)
     season_apply(c, P, old, name, days)
     await u.message.reply_text("✅ Сезон «%s» начался на %d дн.\n\n%s\n\nИгроки получат сумы и награды при заходе в игру (до 45 сек). Лучшим игрокам бот отправил личные сообщения.\nКопия базы сохранена: /backup\n\nОбъявите игрокам: /broadcast 🏁 Начался сезон %s! У всех %s сум, номера и машины остались. Новый Battle Pass, задания и награды ждут вас!" % (
         name, days, txt, name, f"{SEASON_BAL:,}".replace(",", " ")))
