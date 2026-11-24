@@ -245,9 +245,42 @@ SPX = [(1, "879", "MEA", ""), (1, "762", "MMA", ""), (1, "500", "SOO", ""), (0, 
 SSX = {"PAA": 4, "PSS": 4, "PPP": 3, "APC": 3, "TSS": 3, "TST": 3, "ZDF": 3, "DXA": 2, "FVV": 2, "VSB": 2, "VSC": 2, "VSF": 2, "VSD": 2, "VSG": 2, "VSV": 2, "PSF": 2,
        "TTA": 1, "TTB": 1, "TTC": 1, "TTD": 1, "TTE": 1, "TTF": 1, "TTG": 1}
 
+# ---- номера России и Дубая (то же, что ruTier/aeTier в игре)
+RU_SEC = {"ЕКХ", "АМР"}
+RU_MYT = {"АОО", "ВОО", "МОО", "СОО", "КОО", "СКА", "ССС", "МММ", "ААА", "ХХХ", "ККК", "ННН", "ООО", "АММ", "КММ", "АМО", "ЕРЕ", "СКО", "РМР", "ТМР", "ОКО", "ООС", "ОКС", "КМР", "ММР"}
+RU_MOS = {"77", "97", "99", "177", "197", "199", "777", "977"}
+RU_SPB = {"78", "98", "178"}
+def _ru_dsc(d):
+    if len(d) != 3: return 0
+    if d[0] == d[1] == d[2]: return 3
+    if d[:2] == "00": return 3
+    if d[1:] == "00": return 2
+    if d in ("123", "321", "456", "789"): return 2
+    if d[0] == d[2]: return 1
+    return 0
+def ru_tier(r, a, d, z):
+    s = a + z; rc = r[2:]
+    if s in RU_SEC: return 5
+    ds = _ru_dsc(d)
+    if s in RU_MYT: return 5 if ds >= 3 and rc in RU_MOS else 4
+    sc = ds + (2 if len(s) == 3 and s[0] == s[1] == s[2] else 0) + (1 if rc in RU_MOS or rc in RU_SPB else 0) + (1 if d == "777" and rc == "777" else 0)
+    return 3 if sc >= 5 else 2 if sc >= 3 else 1 if sc >= 2 else 0
+AE_TOP = {"AA", "BB", "CC"}
+def ae_tier(d, z):
+    n = len(d); same = n > 1 and len(set(d)) == 1
+    if n == 1: return 5
+    if n == 2: return 5 if z in AE_TOP else 4
+    if n == 3: return 4 if z in AE_TOP or same else 3
+    if n == 4: return 3 if same else 2
+    if same: return 3
+    if d in ("12345", "54321") or d[1:] == "0000" or (d[0] == d[2] == d[4] and d[1] == d[3]): return 1
+    return 0
+
 def tier_py(p):  # то же, что tier() в игре
     try: k = int(p["k"]); r = str(p["r"]); d = str(p["d"]); z = str(p["z"]); a = str(p.get("a") or "")
     except Exception: return 0
+    if r.startswith("RU"): return ru_tier(r, a, d, z)
+    if r in ("DXB", "AUH", "SHJ"): return ae_tier(d, z if r == "DXB" else "")
     if r == "01" and any(x[0] == k and x[1] == d and x[2] == z and x[3] == a for x in SPX): return 5
     if k and (z in SPSER or (r == "01" and d == "007" and z == "AUB")): return 5
     if k and z in MYSER: return 4
