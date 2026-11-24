@@ -2571,6 +2571,24 @@ def cosm_list(b):
     uid, _ = auth(b.get("initData")); c = db()
     return {"own": [x["k"] for x in c.execute("SELECT k FROM cosm WHERE uid=?", (uid,))], "price": COSM, "stars": stars_of(c, uid)}
 
+CTSPIN = {"ru": 20, "ae": 25}   # звёздная крутка России / ОАЭ: редкие номера выпадают чаще
+
+@api("/api/ctspin")
+def ctspin(b):
+    uid, _ = auth(b.get("initData")); c = db(); ct = str(b.get("c") or "")
+    if ct not in CTSPIN: raise HTTPException(400, "Нет такой страны")
+    wspend(c, uid, CTSPIN[ct], "ctspin-" + ct)
+    k = "ctsp:%d" % uid; _meta_set(c, k, int(_meta_get(c, k) or 0) + 1)
+    return {"ok": 1, "stars": stars_of(c, uid)}
+
+@api("/api/ctpaid")
+def ctpaid(b):   # номер из звёздной крутки страны: остаётся навсегда (как номера за звёзды)
+    uid, _ = auth(b.get("initData")); c = db(); p = clean_plate(b.get("p") or {})
+    k = "ctsp:%d" % uid; n = int(_meta_get(c, k) or 0)
+    if n <= 0: return {"ok": 0}
+    _meta_set(c, k, n - 1); mark_paid(c, uid, p); c.commit()
+    return {"ok": 1}
+
 @api("/api/cosm/buy")
 def cosm_buy(b):
     uid, _ = auth(b.get("initData")); c = db(); k = str(b.get("k") or "")
