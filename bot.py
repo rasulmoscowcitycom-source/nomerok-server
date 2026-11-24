@@ -172,7 +172,7 @@ def parse_gift(a):  # a = слова после ID игрока
         return g
     if kind == "stars": return {"t": "stars", "v": max(1, min(100000, int(a[1])))}
     if kind in ("paint", "flame"):   # краски и цвет пламени: /give ID paint gold, /give ID flame blue, /give ID paint all
-        w = a[1].lower(); pool = [k for k in list(COSM) + list(BPC) if not k.startswith(("frm_", "ex_")) and (k.startswith("fl_") or k in ("bp_ice", "bp_fire")) == (kind == "flame")]
+        w = a[1].lower(); pool = [k for k in list(COSM) + list(BPC) if not k.startswith(("frm_", "ex_", "ct_")) and (k.startswith("fl_") or k in ("bp_ice", "bp_fire")) == (kind == "flame")]
         if w == "all": return {"t": "cosm", "v": pool}
         k = next((x for x in pool if x == w or x == "fl_" + w or x == "bp_" + w), None)
         if not k: raise ValueError

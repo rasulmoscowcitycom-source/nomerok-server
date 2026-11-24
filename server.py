@@ -246,7 +246,7 @@ SSX = {"PAA": 4, "PSS": 4, "PPP": 3, "APC": 3, "TSS": 3, "TST": 3, "ZDF": 3, "DX
        "TTA": 1, "TTB": 1, "TTC": 1, "TTD": 1, "TTE": 1, "TTF": 1, "TTG": 1}
 
 # ---- номера России и Дубая (то же, что ruTier/aeTier в игре)
-RU_SEC = {"ЕКХ", "АМР"}
+RU_SEC = {"ЕКХ", "АМР", "КРА", "ВОР"}   # спецсерии: ЕКХ 77/777/97/99, АМР 97/77/99, КРА 95, ВОР 77/777
 RU_MYT = {"АОО", "ВОО", "МОО", "СОО", "КОО", "СКА", "ССС", "МММ", "ААА", "ХХХ", "ККК", "ННН", "ООО", "АММ", "КММ", "АМО", "ЕРЕ", "СКО", "РМР", "ТМР", "ОКО", "ООС", "ОКС", "КМР", "ММР"}
 RU_MOS = {"77", "97", "99", "177", "197", "199", "777", "977"}
 RU_SPB = {"78", "98", "178"}
@@ -940,7 +940,12 @@ import re as _re, html as _html
 TON_RE = _re.compile(r"^((EQ|UQ|kQ|0Q)[A-Za-z0-9_-]{46}|-?[0-9]:[0-9a-fA-F]{64})$")
 NFT_NAMES = {4: "Мифик", 5: "Секретный"}
 
-def nft_title(p): return ("%s %s %s" % (p["d"], p["z"], p["r"])) if p["k"] else ("%s %s %s %s" % (p.get("a", ""), p["d"], p["z"], p["r"]))
+AE_NAME = {"DXB": "DUBAI", "AUH": "ABU DHABI", "SHJ": "SHARJAH"}
+def nft_title(p):
+    r = str(p.get("r", ""))
+    if r in AE_NAME: return "%s %s %s" % (AE_NAME[r], p["z"], p["d"])
+    if r.startswith("RU"): return "%s %s %s | %s RUS" % (p.get("a", ""), p["d"], p["z"], r[2:])
+    return ("%s %s %s" % (p["d"], p["z"], p["r"])) if p["k"] else ("%s %s %s %s" % (p.get("a", ""), p["d"], p["z"], p["r"]))
 
 @api("/api/wallet")
 def wallet_api(b):
@@ -1241,7 +1246,13 @@ def weekend_event(c):
 
 def drop_alert(c, uid, p):
     """Кто-то выбил Мифик/Секретный: сообщить остальным (не чаще раза в 30 минут на всю игру)."""
-    now = int(time.time()); last = int(_meta_get(c, "dropnote") or 0)
+    now = int(time.time())
+    if str(p.get("r", "")) in AE_NAME and len(str(p.get("d", ""))) == 1:   # однозначный номер ОАЭ - сообщение всем, всегда (такие номера единственные, спама не будет)
+        u = c.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+        txt = "🚨💎 ЛЕГЕНДА! Игрок %s (ID %d) выбил ОДНОЗНАЧНЫЙ номер %s 🇦🇪\nТаких номеров в мире единицы — в жизни они стоят десятки миллионов дирхамов! Заходи и испытай удачу 🎰" % (((u["name"] if u else "") or "Игрок"), uid, nft_title(p))
+        push_users(c, "last_seen>? AND id!=?", (now - 30 * 86400, uid), txt, limit=3000)
+        return
+    last = int(_meta_get(c, "dropnote") or 0)
     if now - last < 1800: return
     _meta_set(c, "dropnote", now); u = c.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
     t = tier_py(p); txt = "🔥 Игрок %s (ID %d) выбил %s номер %s! Заходи и ты — твой шанс тоже рядом." % (((u["name"] if u else "") or "Игрок"), uid, "СЕКРЕТНЫЙ" if t >= 5 else "МИФИЧЕСКИЙ", nft_title(p))
@@ -1878,7 +1889,7 @@ def rew_text(r):
     return o
 
 COSM_NAME = {"bp_neon": "краска Неон (Battle Pass)", "bp_royal": "краска Королевский (Battle Pass)", "bp_ice": "ледяное пламя (Battle Pass)", "bp_fire": "огненное пламя (Battle Pass)", "chrome": "краска Хром", "gold": "краска Золото", "matte": "краска Мат", "pearl": "краска Перламутр", "candy": "краска Кэнди",
-             "fl_blue": "синее пламя", "fl_green": "зелёное пламя", "fl_pink": "розовое пламя", "fl_white": "белое пламя", "fl_gold": "золотое пламя", "frm_gold": "золотая рамка профиля", "frm_neon": "неоновая рамка профиля", "frm_ice": "ледяная рамка профиля", "frm_fire": "огненная рамка профиля", "frm_royal": "королевская рамка профиля", "ex_turbo": "турбо-выхлоп (+1% скорость)", "ex_inferno": "инферно-выхлоп (+2% скорость)"}
+             "fl_blue": "синее пламя", "fl_green": "зелёное пламя", "fl_pink": "розовое пламя", "fl_white": "белое пламя", "fl_gold": "золотое пламя", "frm_gold": "золотая рамка профиля", "frm_neon": "неоновая рамка профиля", "frm_ice": "ледяная рамка профиля", "frm_fire": "огненная рамка профиля", "frm_royal": "королевская рамка профиля", "ex_turbo": "турбо-выхлоп (+1% скорость)", "ex_inferno": "инферно-выхлоп (+2% скорость)", "ct_ru": "номера России", "ct_ae": "номера ОАЭ"}
 
 def _paid_keys(c, uid, legacy):
     ks = {r[0] for r in c.execute("SELECT k FROM paidpl WHERE uid=?", (uid,))}
@@ -2550,7 +2561,8 @@ def _race_refund(c, r, why=""):   # вернуть ставку создател
 COSM = {"chrome": 40, "gold": 60, "matte": 25, "pearl": 35, "candy": 45,      # премиум-краски
         "fl_blue": 30, "fl_green": 30, "fl_pink": 30, "fl_white": 40, "fl_gold": 60,   # цвет пламени (звёзды)
         "frm_gold": 80, "frm_neon": 100, "frm_ice": 120, "frm_fire": 150, "frm_royal": 250,   # рамки профиля
-        "ex_turbo": 150, "ex_inferno": 300}   # выхлопы: ускоряют машину в гонках
+        "ex_turbo": 150, "ex_inferno": 300,   # выхлопы: ускоряют машину в гонках
+        "ct_ru": 50, "ct_ae": 100}   # открыть страну (Россия / ОАЭ) раньше уровня
 FRAMES = ("frm_gold", "frm_neon", "frm_ice", "frm_fire", "frm_royal")
 EXH = {"ex_turbo": 0.010, "ex_inferno": 0.020}   # на сколько быстрее время заезда (лучший из купленных)
 
