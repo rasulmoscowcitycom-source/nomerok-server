@@ -2571,7 +2571,7 @@ def cosm_list(b):
     uid, _ = auth(b.get("initData")); c = db()
     return {"own": [x["k"] for x in c.execute("SELECT k FROM cosm WHERE uid=?", (uid,))], "price": COSM, "stars": stars_of(c, uid)}
 
-CTSPIN = {"ru": 20, "ae": 25}   # звёздная крутка России / ОАЭ: редкие номера выпадают чаще
+CTSPIN = {"ru": 29, "ae": 79}   # звёздная крутка России / ОАЭ: редкие номера выпадают чаще
 
 @api("/api/ctspin")
 def ctspin(b):

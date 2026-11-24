@@ -138,7 +138,18 @@ async def terms(u, c):
     await u.message.reply_text("Покупки за Telegram Stars — виртуальные игровые предметы. Возврат возможен по запросу в поддержку: " + SUPPORT)
 
 async def post_init(app):
-    await app.bot.set_my_commands([BotCommand("start", "Начать игру"), BotCommand("paysupport", "Поддержка по оплате"), BotCommand("terms", "Условия покупок")])
+    from telegram import BotCommandScopeChat, BotCommandScopeAllPrivateChats, BotCommandScopeDefault
+    pub = [BotCommand(a, b) for a, b in PUBLIC_CMDS]
+    for sc in (BotCommandScopeAllPrivateChats(),):   # убираем старые списки (из BotFather), чтобы игроки не видели админ-команды
+        try: await app.bot.delete_my_commands(scope=sc)
+        except Exception: pass
+    for lang in ("ru", "en", "uz"):
+        try: await app.bot.delete_my_commands(language_code=lang)
+        except Exception: pass
+    await app.bot.set_my_commands(pub, scope=BotCommandScopeDefault())
+    for a in ADMINS:   # админам — свой список: команды игроков + админские
+        try: await app.bot.set_my_commands(pub + [BotCommand(x, y) for x, y in ADMIN_CMDS], scope=BotCommandScopeChat(chat_id=a))
+        except Exception: pass
     await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp("🎰 Играть", WebAppInfo(url=URL)))
     await app.bot.set_my_short_description("Собирай номера и машины Узбекистана 🇺🇿")
     await app.bot.set_my_description("🎰 UZ Номерок: крути номерные знаки Узбекистана, выбивай редкие номера и машины, меняйся с игроками. Нажми «Запустить»!")
@@ -701,11 +712,123 @@ async def mute(u, ctx):  # /mute - отключить рассылки игры
 async def unmute(u, ctx):
     c = db(); c.execute("UPDATE users SET mute=0 WHERE id=?", (u.effective_user.id,)); c.commit(); await u.message.reply_text("🔔 Уведомления включены")
 
+# ===== команды для новых стран: Россия и ОАЭ =====
+CT_NAME = {"ru": "🇷🇺 Россия", "ae": "🇦🇪 ОАЭ"}
+AE_R = ("DXB", "AUH", "SHJ")
+def _ct_of_key(k):
+    try: r = k.split("|")[1]
+    except Exception: return ""
+    return "ru" if r.startswith("RU") else "ae" if r in AE_R else ""
+def _ct_arg(a):
+    a = (a or "").lower()
+    return "ru" if a in ("ru", "rus", "россия", "russia") else "ae" if a in ("ae", "uae", "оаэ", "dubai", "дубай") else ""
+def _pl(k):
+    kk, r, a, d, z = k.split("|")
+    if r.startswith("RU"): return f"{a} {d} {z} | {r[2:]} RUS"
+    return f"{ {'DXB':'DUBAI','AUH':'ABU DHABI','SHJ':'SHARJAH'}.get(r, r)} {z} {d}"
+
+@admin
+async def countries(u, ctx):   # /countries - статистика России и ОАЭ: открытия за ⭐, звёздные крутки, ONE OF ONE
+    c = db(); out = ["🌍 Новые страны\n"]
+    keys = [x[0] for x in c.execute("SELECT key FROM uniq WHERE owner>0").fetchall()]
+    for ct in ("ru", "ae"):
+        op = c.execute("SELECT COUNT(*) FROM cosm WHERE k=?", ("ct_" + ct,)).fetchone()[0]
+        sp = c.execute("SELECT COUNT(*),COALESCE(-SUM(d),0) FROM wlog WHERE why=?", ("ctspin-" + ct,)).fetchone()
+        sp24 = c.execute("SELECT COUNT(*) FROM wlog WHERE why=? AND ts>?", ("ctspin-" + ct, int(time.time()) - 86400)).fetchone()[0]
+        one = sum(1 for k in keys if _ct_of_key(k) == ct)
+        out.append(f"{CT_NAME[ct]}\n• открыли за ⭐: {op}\n• звёздных круток: {sp[0]} (за сутки {sp24}), получено ⭐ {sp[1]}\n• ONE OF ONE у игроков: {one}\n")
+    out.append("Команды:\n/one ru или /one ae - у кого ONE OF ONE\n/opencountry ID ru|ae - открыть страну игроку\n/closecountry ID ru|ae - закрыть страну\n/ctspins ID - звёздные крутки стран игрока")
+    await u.message.reply_text("\n".join(out))
+
+@admin
+async def one(u, ctx):   # /one ru|ae - список номеров ONE OF ONE страны и их владельцев
+    ct = _ct_arg(ctx.args[0] if ctx.args else "")
+    if not ct: return await u.message.reply_text("Напишите так: /one ru или /one ae")
+    c = db(); rows = [r for r in c.execute("SELECT x.key,x.owner,x.ts,s.name FROM uniq x LEFT JOIN users s ON s.id=x.owner WHERE x.owner>0 ORDER BY x.ts DESC").fetchall() if _ct_of_key(r["key"]) == ct]
+    if not rows: return await u.message.reply_text(f"{CT_NAME[ct]}: ONE OF ONE пока ни у кого нет")
+    lines = [f"{_pl(r['key'])} - {r['name'] or 'Игрок'} ({r['owner']}) · {time.strftime('%d.%m %H:%M', time.gmtime(r['ts'] + 5 * 3600))}" for r in rows[:40]]
+    await u.message.reply_text(f"{CT_NAME[ct]} · ONE OF ONE: {len(rows)}\n\n" + "\n".join(lines) + ("\n…" if len(rows) > 40 else ""))
+
+@admin
+async def opencountry(u, ctx):   # /opencountry ID ru|ae - открыть страну игроку бесплатно (как будто купил за ⭐)
+    try: uid = int(ctx.args[0]); ct = _ct_arg(ctx.args[1])
+    except Exception: ct = ""
+    if not ct: return await u.message.reply_text("Напишите так: /opencountry ID ru или /opencountry ID ae")
+    c = db()
+    if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone(): return await u.message.reply_text("Игрок с таким ID не найден")
+    c.execute("INSERT OR IGNORE INTO cosm VALUES(?,?,?)", (uid, "ct_" + ct, int(time.time()))); c.commit()
+    notify(uid, f"🎁 Вам открыта страна {CT_NAME[ct]}! Нажмите «Страна» над крутками.")
+    await u.message.reply_text(f"✅ Игроку {uid} открыта {CT_NAME[ct]}")
+
+@admin
+async def closecountry(u, ctx):   # /closecountry ID ru|ae - забрать открытие страны
+    try: uid = int(ctx.args[0]); ct = _ct_arg(ctx.args[1])
+    except Exception: ct = ""
+    if not ct: return await u.message.reply_text("Напишите так: /closecountry ID ru или /closecountry ID ae")
+    c = db(); n = c.execute("DELETE FROM cosm WHERE uid=? AND k=?", (uid, "ct_" + ct)).rowcount; c.commit()
+    await u.message.reply_text(f"{'✅ Закрыто' if n else 'У игрока эта страна не была открыта за ⭐'}: {CT_NAME[ct]} · {uid}")
+
+@admin
+async def ctspins(u, ctx):   # /ctspins ID - звёздные крутки стран у игрока
+    try: uid = int(ctx.args[0])
+    except Exception: return await u.message.reply_text("Напишите так: /ctspins ID")
+    c = db(); out = [f"🌍 Игрок {uid}"]
+    for ct in ("ru", "ae"):
+        n, s = c.execute("SELECT COUNT(*),COALESCE(-SUM(d),0) FROM wlog WHERE uid=? AND why=?", (uid, "ctspin-" + ct)).fetchone()
+        own = c.execute("SELECT 1 FROM cosm WHERE uid=? AND k=?", (uid, "ct_" + ct)).fetchone()
+        one = [r[0] for r in c.execute("SELECT key FROM uniq WHERE owner=?", (uid,)).fetchall() if _ct_of_key(r[0]) == ct]
+        out.append(f"\n{CT_NAME[ct]}: {'открыта за ⭐' if own else 'не покупал открытие'}\nзвёздных круток: {n} · потрачено ⭐ {s}\nONE OF ONE: {len(one)}" + ("".join("\n• " + _pl(k) for k in one[:15])))
+    await u.message.reply_text("\n".join(out))
+
+def _ct_kb():
+    return InlineKeyboardMarkup([[SB("🎰 Открыть игру", "success", web_app=WebAppInfo(url=URL))]])
+
+async def russia(u, ctx):   # /russia - для игроков: как играть номерами России
+    await u.message.reply_text("🇷🇺 Номера России\n\n• Формат как в жизни: А 777 АА | 77 RUS\n• 👑 Золотые регионы 77, 777, 97, 95 — самые дорогие\n• Спецсерии ONE OF ONE: КРА (95), АМР (97), ЕКХ и ВОР (77, 777) — у каждого номера один владелец\n• Платишь рублями по курсу, обмен −15%\n• ⭐ Звёздная крутка России — 29 ⭐: только Эпик и выше, номер навсегда\n• Открывается с 8 уровня или за 50 ⭐\n\nВ игре: «Страна» над крутками → Россия", reply_markup=_ct_kb())
+
+async def dubai(u, ctx):   # /dubai - для игроков: как играть номерами ОАЭ
+    await u.message.reply_text("🇦🇪 Номера ОАЭ\n\n• Дубай, Абу-Даби, Шарджа\n• Чем меньше цифр, тем дороже. Однозначные и двузначные — ONE OF ONE\n• AA, BB, CC — самые дорогие коды Дубая\n• Платишь дирхамами (−15%) или долларами (−20%)\n• ⭐ Звёздная крутка ОАЭ — 79 ⭐: только Эпик и выше, номер навсегда\n• Открывается с 12 уровня или за 100 ⭐\n\nВ игре: «Страна» над крутками → ОАЭ", reply_markup=_ct_kb())
+
+
+async def info(u, ctx):   # /info - что это за игра и в чём суть
+    await u.message.reply_text(
+        "🎰 UZ Номерок — игра про автомобильные номера\n\n"
+        "В чём суть:\n"
+        "• Крутишь рулетку и выбиваешь номерные знаки — от обычных до редчайших\n"
+        "• Чем красивее номер (777, 001, одинаковые буквы, спецсерии), тем он дороже\n"
+        "• Номера можно продать, оставить, надеть на машину — машина с номером приносит доход каждую секунду\n"
+        "• Торгуй на аукционе и витрине, передавай номера друзьям, гоняй в гонках и дуэлях\n"
+        "• 💎 ONE OF ONE — номер существует в одном экземпляре, второго такого нет ни у кого\n"
+        "• ⭐ Звёздная крутка — только редкие номера, и они остаются навсегда, даже в новом сезоне\n\n"
+        "Страны:\n"
+        "🇺🇿 Узбекистан — /uzb\n🇷🇺 Россия — /russia\n🇦🇪 ОАЭ — /dubai\n\n"
+        "Сезоны: каждый сезон начинается заново, а номера за звёзды остаются.\n"
+        "Удачи! 🍀", reply_markup=_ct_kb())
+
+async def uzb(u, ctx):   # /uzb - номера Узбекистана
+    await u.message.reply_text(
+        "🇺🇿 Номера Узбекистана\n\n"
+        "• Физ. лицо: 01 A 777 AA · Фирма: 01 777 AAA\n"
+        "• Регионы: 01 Ташкент, 10 Ташкентская обл., 20 Сырдарья, 25 Джизак, 30 Самарканд, 40 Фергана, 50 Наманган, 60 Андижан, 70 Кашкадарья, 75 Сурхандарья, 80 Бухара, 85 Навои, 90 Хорезм, 95 Каракалпакстан\n"
+        "• Редкость: Обычный → Редкий → Эпик → Легендарный → Мифик → Секретный\n"
+        "• Крутки: Обычная · Улучшенная · Премиум — чем дороже, тем выше шанс\n"
+        "• 💎 Секретные AAA, SBA, UZB и Мифик-серии XXX, OOO, LJA… — ONE OF ONE\n"
+        "• ⭐ Звёздная крутка — 25 ⭐: только Мифик и Секретный, номер навсегда\n\n"
+        "В игре: вкладка «Крутка»", reply_markup=_ct_kb())
+
+ADMIN_CMDS = [("broadcast", "Рассылка всем игрокам"), ("post", "Пост в канал"), ("player", "Сводка по игроку"), ("find", "Найти игрока"), ("give", "Выдать предмет"),
+              ("addbal", "Пополнить сумы"), ("takebal", "Списать сумы"), ("addstars", "Выдать звёзды"), ("plate", "Чей номер"), ("wlog", "Журнал звёзд"),
+              ("restore", "Вернуть номера"), ("countries", "Россия и ОАЭ: статистика"), ("one", "ONE OF ONE страны"), ("opencountry", "Открыть страну игроку"),
+              ("ctspins", "Звёздные крутки стран игрока"), ("uniq", "Единственные номера"), ("players", "Игроки"), ("stat", "Здоровье сервера"), ("backup", "Копия базы"),
+              ("newseason", "Новый сезон"), ("audit", "Сверка звёзд"), ("income", "Доход машин"), ("event", "Ивент"), ("promo", "Промокоды"), ("ads", "Реклама")]
+PUBLIC_CMDS = [("start", "Начать игру"), ("info", "ℹ️ Что это за игра"), ("uzb", "🇺🇿 Номера Узбекистана"), ("russia", "🇷🇺 Номера России"), ("dubai", "🇦🇪 Номера ОАЭ"),
+               ("paysupport", "Поддержка по оплате"), ("terms", "Условия покупок")]
+
 app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 app.add_handler(CallbackQueryHandler(how, pattern="^how$"))
 app.add_handler(CallbackQueryHandler(chk, pattern="^chk$"))
 app.add_handler(PreCheckoutQueryHandler(precheckout))
 app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
-for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("restore", restore), ("audit", audit), ("plate", plate), ("wlog", wlog_cmd), ("player", player_cmd), ("post", post), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute)]:
+for n, f in [("start", start), ("players", players), ("give", give), ("ultra", ultra), ("ads", ads), ("adsint", adsint), ("promo", promo), ("event", event), ("find", find), ("stars", stars), ("notifytest", notifytest), ("newseason", newseason), ("income", income), ("restore", restore), ("audit", audit), ("plate", plate), ("wlog", wlog_cmd), ("player", player_cmd), ("post", post), ("lastpay", lastpay), ("resetall", resetall), ("paysupport", paysupport), ("terms", terms), ("addbal", addbal), ("takebal", takebal), ("addstars", addstars), ("reset", reset), ("broadcast", broadcast), ("uniq", uniq), ("stat", stat), ("season", season), ("backup", backup), ("nftlist", nftlist), ("nftdone", nftdone), ("nftno", nftno), ("nftitem", nftitem), ("addton", addton), ("tonwd", tonwd), ("tonpaid", tonpaid), ("tonno", tonno), ("tonstat", tonstat), ("mute", mute), ("unmute", unmute), ("countries", countries), ("one", one), ("opencountry", opencountry), ("closecountry", closecountry), ("ctspins", ctspins), ("russia", russia), ("dubai", dubai), ("info", info), ("uzb", uzb)]:
     app.add_handler(CommandHandler(n, f))
 app.run_polling()
