@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>UZ Номерок</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700;800&family=Roboto+Condensed:wght@500;600&family=Montserrat:wght@700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'"><noscript><link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700;800&display=swap" rel="stylesheet"></noscript>
+<title>UZ Номерок</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700;800&family=Roboto+Condensed:wght@500;600;700;800&family=Montserrat:wght@700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'"><noscript><link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700;800&display=swap" rel="stylesheet"></noscript>
 <style>
 :root{--bg:#eef1f7;--card:#fff;--c2:#e6eaf3;--tx:#10131a;--mut:#6a7385;--ac:#1d9bf0;--ln:#d8deea;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#07090e;--card:#121722;--c2:#1a2030;--tx:#eef1f7;--mut:#8791a5;--ln:#232b3d}}
@@ -141,12 +141,13 @@ var kind=0,busy=false,$=function(i){return document.getElementById(i)};
 var AC=null,snd=true;
 function beep(f,d,t,v,dl){if(!snd)return;try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();var o=AC.createOscillator(),g=AC.createGain(),s=AC.currentTime+(dl||0);o.type=t||"sine";o.frequency.value=f;g.gain.setValueAtTime(v||.15,s);g.gain.exponentialRampToValueAtTime(.001,s+d);o.connect(g);g.connect(AC.destination);o.start(s);o.stop(s+d)}catch(e){}}
 var shown=null,tgt=null,balT=0;
-function setBal(to){var el=$("bal");if(shown===null){shown=tgt=to;el.textContent=fmt(to);return}if(to===tgt)return;var from=shown,t0=performance.now(),up=to>from;tgt=to;
+function bfmt(n){if(typeof CTRY!="undefined"&&CTRY!="uz"&&typeof FX!="undefined")return fxMoney(n/FX[CTRY],CTRY);return fmt(n)}
+function setBal(to){var el=$("bal");if(shown===null){shown=tgt=to;el.textContent=bfmt(to);return}if(to===tgt)return;var from=shown,t0=performance.now(),up=to>from;tgt=to;
  el.classList.remove("up","dn");void el.offsetWidth;el.classList.add(up?"up":"dn");
  if(!up)try{navigator.vibrate&&navigator.vibrate(40)}catch(e){}
- var d=document.createElement("span");d.className="dl "+(up?"up":"dn");d.textContent=(up?"+":"−")+fmt(Math.abs(to-from));el.parentNode.appendChild(d);setTimeout(function(){d.remove()},1000);
+ var d=document.createElement("span");d.className="dl "+(up?"up":"dn");d.textContent=(up?"+":"−")+bfmt(Math.abs(to-from));el.parentNode.appendChild(d);setTimeout(function(){d.remove()},1000);
  cancelAnimationFrame(balT);
- (function f(t){var k=Math.min(1,(t-t0)/700),e=1-Math.pow(1-k,3);shown=Math.round(from+(to-from)*e);el.textContent=fmt(shown);if(k<1)balT=requestAnimationFrame(f);else{shown=to;setTimeout(function(){el.classList.remove("up","dn")},300)}})(t0)}
+ (function f(t){var k=Math.min(1,(t-t0)/700),e=1-Math.pow(1-k,3);shown=Math.round(from+(to-from)*e);el.textContent=bfmt(shown);if(k<1)balT=requestAnimationFrame(f);else{shown=to;setTimeout(function(){el.classList.remove("up","dn")},300)}})(t0)}
 function say(x){if(!snd)return;try{var u=new SpeechSynthesisUtterance(LANG=="en"?T(x):x);u.lang=LANG=="en"?"en-US":"ru-RU";speechSynthesis.speak(u)}catch(e){}}
 function chime(t){var n=[523,659,784,1047,1319,1568];for(var i=0;i<Math.min(2+t,6);i++)beep(n[i],.35,"triangle",.18,i*.09);if(t>=3)beep(2093,.8,"sine",.12,.5);try{navigator.vibrate&&navigator.vibrate(t>=2?[30,40,60]:15)}catch(e){}}
 function burst(t){for(var i=0;i<18+t*10;i++){var e=document.createElement("i");e.className="cf";e.style.background=["#f59e0b","#ef4444","#3b82f6","#22c55e","#a855f7"][i%5];e.style.setProperty("--x",(rnd(360)-180)+"px");e.style.setProperty("--y",(rnd(400)-250)+"px");document.body.appendChild(e);(function(x){setTimeout(function(){x.remove()},1300)})(e)}}
@@ -383,7 +384,7 @@ function claimRoll(p,n,cb){var t=tier(p);if(t<4||typeof TGD=="undefined"||!TGD||
    if(TGD&&LOADED)api("/api/ucheck",{p:p}).then(function(r){$("ck_u").innerHTML=r.taken?"🔒 Уже занят: "+r.owner:"✅ Свободен - может выпасть"}).catch(function(){});
    else $("ck_u").innerHTML+=" · занятость видна только в Telegram"}}})();
 var oc=-1,fd=false,opl=-1;
-function openPl(i){var p=st.col[i];if(!p)return;opl=i;var t=tier(p);$("pdt").innerHTML='<div class="sc cdc"><div class="cbig" style="padding:34px 8px;--c2:var(--card)"><span class="pbl">'+plate(p)+'</span></div><div class="hd c'+t+'" style="margin:12px 0 8px">'+NM[t]+'</div><div class="grid"><div class="tile">Регион<small>'+REG[p.r]+'</small></div><div class="tile">Стоимость<small>'+fmt(val(p))+'</small></div></div>'+(typeof pGraph=='function'?pGraph(p):'')+(p.k&&SS[p.z]?'<div class="box" style="margin-top:8px;font-size:13px">★ Спецсерия · '+SS[p.z][0]+'</div>':'')+(t>=4?'<div class="box oo1b" style="margin-top:8px;font-size:13px"><b>ONE OF ONE</b> · единственный экземпляр в игре — второго такого нет ни у кого</div>':'')+'<div class="b"><button data-a="s">💰 Продать '+sh(val(p))+'</button></div>'+(typeof TGD!="undefined"&&TGD?'<div class="b"><button data-a="au">🔨 На аукцион</button><button data-a="sh">🛒 На витрину</button></div><div class="b"><button data-a="snd">🎁 Передать по ID</button>'+(t>=4?'<button data-a="nft">💎 Вывести в NFT</button>':'<button data-a="du">⚔️ В дуэль</button>')+'</div>':'')+'<div class="b"><button data-a="oncar">🚗 Надеть на машину</button></div><div class="b"><button data-a="up">⚡ В апгрейд</button><button data-a="cp">📋 Копировать</button></div>'+'<div class="b"><button data-a="x">Закрыть</button></div></div>';$("pdt").hidden=false}
+function openPl(i){var p=st.col[i];if(!p)return;opl=i;var t=tier(p);$("pdt").innerHTML='<div class="sc cdc"><div class="cbig" style="padding:34px 8px;--c2:var(--card)"><span class="pbl">'+plate(p)+'</span></div><div class="hd c'+t+'" style="margin:12px 0 8px">'+NM[t]+'</div><div class="grid"><div class="tile">Регион<small>'+REG[p.r]+'</small></div><div class="tile">Стоимость<small>'+fmt(val(p))+(typeof cty=="function"&&cty(p)!="uz"?'<br><em class="cvl">≈ '+locShow(Math.round(locVal(p)*mkIdx(cty(p))*pIdx(p)/100)*100,cty(p))+'</em>':'')+'</small></div></div>'+(typeof pGraph=='function'?pGraph(p):'')+(p.k&&SS[p.z]?'<div class="box" style="margin-top:8px;font-size:13px">★ Спецсерия · '+SS[p.z][0]+'</div>':'')+(t>=4?'<div class="box oo1b" style="margin-top:8px;font-size:13px"><b>ONE OF ONE</b> · единственный экземпляр в игре — второго такого нет ни у кого</div>':'')+'<div class="b"><button data-a="s">💰 Продать '+sh(val(p))+'</button></div>'+(typeof TGD!="undefined"&&TGD?'<div class="b"><button data-a="au">🔨 На аукцион</button><button data-a="sh">🛒 На витрину</button></div><div class="b"><button data-a="snd">🎁 Передать по ID</button>'+(t>=4?'<button data-a="nft">💎 Вывести в NFT</button>':'<button data-a="du">⚔️ В дуэль</button>')+'</div>':'')+'<div class="b"><button data-a="oncar">🚗 Надеть на машину</button></div><div class="b"><button data-a="up">⚡ В апгрейд</button><button data-a="cp">📋 Копировать</button></div>'+'<div class="b"><button data-a="x">Закрыть</button></div></div>';$("pdt").hidden=false}
 var SNDI=-1;
 function sndInline(i){var p=st.col[i];if(!p)return;var el=$("pdt");el.innerHTML='<div class="sc cdc"><div class="hd">🎁 Передать номер</div><div style="text-align:center;margin:8px 0">'+plate(p,1)+'</div><div style="font-size:13px;color:var(--mut);text-align:center;margin-bottom:8px">Номер сразу перейдёт к игроку. Отменить передачу нельзя. ID игрока можно узнать в его профиле в игре.</div><input class="inp" id="sndid" type="text" inputmode="numeric" placeholder="ID игрока"><button class="xbuy" data-a="sndo">Передать</button><div class="b"><button data-a="sndb">‹ Назад</button></div></div>';el.hidden=false}
 var TCU=null;
@@ -2454,7 +2455,7 @@ AEC="ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""),AE_TOP=["AA","BB","CC"],AUHC=["1","4"
 /* цены как в жизни: Россия — госпошлина ~3 тыс ₽, красивые 40–750 тыс (Госуслуги), блатные — миллионы, АМР до 35 млн ₽;
    ОАЭ — обычный ~5 тыс AED, M 786 — 565 тыс, CC44 — 6,7 млн, BB12 — 9,7 млн, P 7 — 55 млн; Абу-Даби №1 — 52 млн AED; Шарджа дешевле */
 RUV=[3000,40000,400000,2000000,14000000,20000000],AEV=[5000,35000,100000,400000,3000000,15000000],
-CTP={ru:[.60,.25,.11,.032,.007,.001],ae:[.56,.25,.13,.05,.0095,.0005]},CTL={ru:8,ae:12},CTN={uz:"Узбекистан",ru:"Россия",ae:"ОАЭ"};
+CTP={ru:[.60,.25,.105,.03,.013,.002],ae:[.56,.25,.125,.048,.015,.002]},CTL={ru:8,ae:12},CTN={uz:"Узбекистан",ru:"Россия",ae:"ОАЭ"};
 RUR.forEach(function(x){REG["RU"+x[0]]=x[1]});AER.forEach(function(x){REG[x[0]]=x[1]});
 function isAE(r){return r=="DXB"||r=="AUH"||r=="SHJ"}
 function cty(p){return !p||!p.r?"uz":isAE(p.r)?"ae":p.r.slice(0,2)=="RU"?"ru":"uz"}
@@ -2484,7 +2485,7 @@ function luckF(c){var P=CTP[c],Lf=1/* бусты удачи на другие с
  var Q=P.map(function(x,i){return i>=2?x*Lf:x}),S=Q.reduce(function(a,b){return a+b},0);Q[0]+=1-S;
  for(i=5;i>=1;i--){acc+=Q[i];if(q<acc){t=i;break}}return ctMk(c,t)}
 /* цена крутки = средняя стоимость выпадающего номера в местной валюте (посчитано на тысячах круток) */
-var CTC={"ru":{"16":135000,"23":130000,"25":130000,"47":140000,"50":140000,"52":140000,"54":140000,"61":140000,"63":140000,"66":135000,"74":135000,"77":425000,"78":135000,"90":135000,"95":270000,"97":435000,"98":135000,"99":310000,"150":140000,"177":300000,"178":135000,"197":305000,"199":305000,"777":435000,"":335000,"05":135000,"02":135000},"ae":{"":70000,"DXB":85000,"AUH":75000,"SHJ":30000}};
+var CTC={"ru":{"16":140000,"23":140000,"25":140000,"47":150000,"50":145000,"52":150000,"54":150000,"61":150000,"63":150000,"66":145000,"74":140000,"77":600000,"78":140000,"90":140000,"95":320000,"97":625000,"98":140000,"99":435000,"150":150000,"177":420000,"178":140000,"197":425000,"199":425000,"777":610000,"":490000,"05":140000,"02":145000},"ae":{"":105000,"DXB":125000,"AUH":105000,"SHJ":45000}};
 function ctCost(c){var r=CREG[c]||"";return CTC[c][r]||CTC[c][""]}
 function ctSum(c){return Math.round(ctCost(c)*mkIdx(c)*FX[c]*(1+fee(c))/1000)*1000}
 function ctSave(){try{localStorage.setItem("uzn_ct",CTRY);localStorage.setItem("uzn_cr",JSON.stringify(CREG))}catch(x){}}
@@ -2538,8 +2539,8 @@ var CTST={ru:50,ae:100},CTCF=null;
 function cOwn(){return window.CSH&&CSH.cown?CSH.cown():null}
 function ctOwn(c){var o=cOwn();return !!o&&o.indexOf("ct_"+c)>=0}
 function ctLk(c){return c!="uz"&&st.lv<CTL[c]&&!ctOwn(c)}
-function ctBuy(c){if(!(typeof TGD!="undefined"&&TGD)){toast("Откройте игру в Telegram");return}if(CTCF!=c){CTCF=c;toast("Нажмите ещё раз — открыть "+CTN[c]+" за "+CTST[c]+" ⭐");setTimeout(function(){if(CTCF==c)CTCF=null},4000);return}CTCF=null;api("/api/cosm/buy",{k:"ct_"+c}).then(function(j){CSH.addOwn("ct_"+c);if(typeof j.stars=="number")setStars(j.stars);toast("🎉 "+CTN[c]+" открыта навсегда!");var was=CTRY;CTRY=c;ctSave();$("cts").hidden=true;draw();flyTo(was,c)}).catch(function(e){toast(e.message)})}
-function ctPick(id,v){if(id=="cts"){if(ctLk(v)){ctBuy(v);return}var was=CTRY;CTRY=v;ctSave();$("cts").hidden=true;draw();flyTo(was,v)}
+function ctBuy(c){if(!(typeof TGD!="undefined"&&TGD)){toast("Откройте игру в Telegram");return}if(CTCF!=c){CTCF=c;toast("Нажмите ещё раз — открыть "+CTN[c]+" за "+CTST[c]+" ⭐");setTimeout(function(){if(CTCF==c)CTCF=null},4000);return}CTCF=null;api("/api/cosm/buy",{k:"ct_"+c}).then(function(j){CSH.addOwn("ct_"+c);if(typeof j.stars=="number")setStars(j.stars);toast("🎉 "+CTN[c]+" открыта навсегда!");var was=CTRY;CTRY=c;ctSave();($("cts")||{}).hidden=true;draw();flyTo(was,c)}).catch(function(e){toast(e.message)})}
+function ctPick(id,v){if(id=="cts"){if(ctLk(v)){ctBuy(v);return}var was=CTRY;CTRY=v;ctSave();($("cts")||{}).hidden=true;draw();flyTo(was,v)}
  else{CREG[CTRY]=v=="*"?"":v;ctSave();$("crs").hidden=true;draw()}}
 function ctOpen(){if(window.CSH&&cOwn()===null)CSH.load(function(){if(!$("cts").hidden)ctOpen()});var h='<div class="hd">🌍 Страна номеров</div><div class="ctl">'+["uz","ru","ae"].map(function(c){var lk=ctLk(c);
   return '<button data-pick="'+c+'" class="'+(CTRY==c?"on":"")+(lk?" lk":"")+'">'+FLG[c]+'<span><b>'+CTN[c]+(CTRY==c?' <small class="ctcur">ты здесь</small>':'')+'</b><small>'+(c=="uz"?"Обычные крутки за сумы":c=="ru"?"Спецсерии ЕКХ, АМР, КРА, ВОР · платишь ₽":"Дубай · Абу-Даби · Шарджа · AED или $")+'</small></span><em>'+(lk?"🔒 "+CTL[c]+" ур.<br><u class=\"ctst\">или ⭐ "+CTST[c]+"</u>":c=="uz"?"":locShow(Math.round(ctCost(c)*mkIdx(c)/100)*100,c)+'<br><u class="'+(mkChg(c,24)>=0?"up":"dn")+'">'+pct(mkChg(c,24))+'</u>')+'</em></button>'}).join("")+'</div>'
@@ -2601,14 +2602,14 @@ function pGraph(p){try{var c=cty(p),h=Math.floor(Date.now()/36e5),N=60,stp=12,cu
  if(a=="carpick"){var p2=st.col[opl],c=st.cars[+b.dataset.ci];if(!p2||!c)return;st.col.splice(opl,1);if(c.pl)st.col.push(c.pl);c.pl=p2;save();draw();this.hidden=true;toast("🚗 Номер надет на "+c.n);return}
  return o.call(this,e)}})();
 /* ---- звёздная крутка страны: платишь ⭐, редкие номера выпадают намного чаще ---- */
-var CTSP={ru:20,ae:25},CTSD={ru:[0,0,.5,.33,.14,.03],ae:[0,0,.5,.34,.14,.02]},CTSTAR=0,CTSCF=0;
+var CTSP={ru:20,ae:25},CTSD={ru:[0,0,.40,.30,.24,.06],ae:[0,0,.40,.31,.24,.05]},CTSTAR=0,CTSCF=0;
 (function(){var lf=luckF;luckF=function(c){if(!CTSTAR)return lf(c);var P=CTSD[c],q=Math.random(),acc=0,t=2;for(var i=5;i>=2;i--){acc+=P[i];if(q<acc){t=i;break}}return ctMk(c,t)}
  var pr=price;price=function(){return CTSTAR?0:pr()};
  var sh0=show;show=function(p,cls,anim){sh0(p,cls,anim);if(p&&p.d!="???"&&tier(p)>=4){var s=$("stage"),e=document.createElement("div");e.className="oo1";e.textContent="ONE OF ONE";s.appendChild(e)}
   if(CTSTAR&&p&&p.d!="???"&&cty(p)!="uz"){CTSTAR=0;var pp=p;api("/api/ctpaid",{p:pp}).then(function(r){if(r.ok){PKS0[pkOf(pp)]=1;try{draw()}catch(z){}}}).catch(function(){})}}})();
 function ctStarSpin(){var c=CTRY;if(c=="uz"||busy||pend)return;if(!(typeof TGD!="undefined"&&TGD)){toast("Откройте игру в Telegram");return}
  if(CTSCF!=c){CTSCF=c;toast("Нажмите ещё раз — звёздная крутка за "+CTSP[c]+" ⭐");setTimeout(function(){CTSCF=0},4000);return}CTSCF=0;
- var b=$("ctsb");if(b)b.disabled=true;
+ var b=$("ctsb2");if(b)b.disabled=true;
  api("/api/ctspin",{c:c}).then(function(j){if(typeof j.stars=="number")setStars(j.stars);CTSTAR=1;setTimeout(function(){CTSTAR=0},60000);$("go").click();if(b)b.disabled=false}).catch(function(e){if(b)b.disabled=false;toast(e.message)})}
 (function(){var u=ctUI;ctUI=function(){u();var g=$("go"),b=$("ctsb");if(!b){b=document.createElement("button");b.id="ctsb";b.className="ctsb";b.onclick=ctStarSpin;g.parentNode.insertBefore(b,g.nextSibling)}
  var f=CTRY!="uz";b.hidden=!f||!!pend||busy;if(f)b.innerHTML='<b>⭐ Звёздная крутка · '+CTSP[CTRY]+' ⭐</b><small>Только Эпик и выше · ONE OF ONE чаще в 10+ раз · номер навсегда</small>'}})();
@@ -2704,6 +2705,65 @@ flyTo=function(a,b,cb){if(a==b){cb&&cb();return}var o=document.createElement("di
   +'<div class="fttl">'+FLG[b]+'<b>'+N+'</b><small>Добро пожаловать · '+S+'</small></div>';
  document.body.appendChild(o);try{if(navigator.vibrate)navigator.vibrate(15)}catch(e){}
  setTimeout(function(){cb&&cb()},900);setTimeout(function(){o.remove()},1900)};
+
+/* ---- баланс в валюте выбранной страны ---- */
+(function(){var u=ctUI;ctUI=function(){u();try{var el=$("bal");if(typeof shown!="undefined"&&shown!==null&&!(el.classList.contains("up")||el.classList.contains("dn")))el.textContent=bfmt(shown);
+ var s=$("bals");if(!s){s=document.createElement("small");s.id="bals";s.className="bals";el.parentNode.appendChild(s)}var f=CTRY!="uz";s.hidden=!f;
+ if(f){var c=CTRY;s.textContent="= "+fmt(Math.floor(st.bal))+" · 1 "+FXN[c]+" = "+frt(Math.round(FX[c]*10)/10)+" сум"}}catch(e){}}})();
+/* ---- реалистичнее: Кремль (Спасская башня, стена «ласточкин хвост», Василий Блаженный) и Бурдж-Халифа ---- */
+(function(){var old=lmSVG;lmSVG=function(c){
+ if(c=="ru"){var m='',d='';for(var x=-6;x<406;x+=11)m+='M'+x+' 168v-9l2.5 3.5 3-3.5 3 3.5 2.5-3.5v9z';
+  var star=function(cx,cy,r){var p='';for(var i=0;i<10;i++){var a=Math.PI/5*i-Math.PI/2,rr=i%2?r*.45:r;p+=(i?'L':'M')+(cx+rr*Math.cos(a)).toFixed(1)+' '+(cy+rr*Math.sin(a)).toFixed(1)}return '<path d="'+p+'Z" fill="#dc2626" stroke="#fbbf24" stroke-width="1.2" class="lst"/>'};
+  var tent=function(cx,y,w,h){return '<path d="M'+(cx-w/2)+' '+y+'L'+cx+' '+(y-h)+'L'+(cx+w/2)+' '+y+'Z" fill="url(#lmGr)"/><path d="M'+cx+' '+(y-h)+'L'+(cx-w/4)+' '+y+'M'+cx+' '+(y-h)+'L'+(cx+w/4)+' '+y+'" stroke="#fbbf2499" stroke-width=".8"/>'};
+  var tower=function(cx,top,w,sh){return '<rect x="'+(cx-w/2)+'" y="'+top+'" width="'+w+'" height="'+(170-top)+'" fill="url(#lmRb)"/><rect x="'+(cx-w/2-1.5)+'" y="'+top+'" width="'+(w+3)+'" height="3" fill="#f5f5f4"/><rect x="'+(cx-w/2+3)+'" y="'+(top-12)+'" width="'+(w-6)+'" height="12" fill="#b91c1c"/><rect x="'+(cx-w/2+3)+'" y="'+(top-13)+'" width="'+(w-6)+'" height="2" fill="#f5f5f4"/>'+tent(cx,top-12,w-4,sh)+star(cx,top-18-sh,5)};
+  var onion=function(cx,y,r,c1,c2){return '<rect x="'+(cx-r*.75)+'" y="'+y+'" width="'+r*1.5+'" height="'+(170-y)+'" fill="#e7d3b0"/><rect x="'+(cx-r*.75)+'" y="'+(y+6)+'" width="'+r*1.5+'" height="3" fill="#b45309"/><path d="M'+(cx-r)+' '+y+'C'+(cx-r*1.3)+' '+(y-r*1.1)+' '+(cx-r*.2)+' '+(y-r*1.6)+' '+cx+' '+(y-r*2.4)+'C'+(cx+r*.2)+' '+(y-r*1.6)+' '+(cx+r*1.3)+' '+(y-r*1.1)+' '+(cx+r)+' '+y+'Z" fill="'+c1+'"/><path d="M'+(cx-r*.7)+' '+(y-r*.3)+'C'+(cx-r*.6)+' '+(y-r*1.2)+' '+(cx-r*.1)+' '+(y-r*1.6)+' '+cx+' '+(y-r*2.3)+'M'+(cx+r*.1)+' '+(y-r*.1)+'C'+(cx+r*.4)+' '+(y-r*1)+' '+(cx+r*.3)+' '+(y-r*1.6)+' '+cx+' '+(y-r*2.3)+'" stroke="'+c2+'" stroke-width="2.4" fill="none"/><path d="M'+cx+' '+(y-r*2.4)+'v-9M'+(cx-3)+' '+(y-r*2.4-6)+'h6" stroke="#fbbf24" stroke-width="1.6"/>'};
+  var s='<defs><linearGradient id="lmRb" x1="0" x2="1"><stop offset="0" stop-color="#7f1d1d"/><stop offset=".35" stop-color="#b91c1c"/><stop offset=".7" stop-color="#991b1b"/><stop offset="1" stop-color="#6b1414"/></linearGradient><linearGradient id="lmGr" x1="0" x2="1"><stop offset="0" stop-color="#14532d"/><stop offset=".5" stop-color="#15803d"/><stop offset="1" stop-color="#0f3d22"/></linearGradient></defs>'
+   +tower(112,128,18,30)+tower(150,140,14,22)
+   +onion(262,128,11,"#16a34a","#fde047")+onion(282,118,13,"#dc2626","#fff")+'<rect x="294" y="80" width="14" height="90" fill="#e7d3b0"/>'+tent(301,80,16,40)+'<path d="M301 40v-8" stroke="#fbbf24" stroke-width="1.6"/><circle cx="301" cy="38" r="3.5" fill="#facc15"/>'+onion(318,124,12,"#2563eb","#fde047")+onion(337,134,9,"#f59e0b","#16a34a")
+   /* Спасская башня */
+   +'<rect x="174" y="118" width="52" height="52" fill="url(#lmRb)"/><path d="M190 170v-22q10-12 20 0v22z" fill="#3f0d0d"/>'
+   +'<rect x="178" y="86" width="44" height="32" fill="url(#lmRb)"/><rect x="176" y="115" width="48" height="3" fill="#f5f5f4"/>'
+   +'<circle cx="200" cy="102" r="12" fill="#1e3a8a" stroke="#fbbf24" stroke-width="2.2"/><path d="M200 102v-8M200 102l6 3" stroke="#fbbf24" stroke-width="1.6"/>'
+   +[178,222].map(function(x){return '<path d="M'+(x-3)+' 86l3-12 3 12z" fill="#f5f5f4"/>'}).join("")+'<rect x="176" y="83" width="48" height="3" fill="#f5f5f4"/>'
+   +'<rect x="184" y="62" width="32" height="21" fill="url(#lmRb)"/>'+[188,196,204].map(function(x){return '<path d="M'+x+' 80v-9q4-5 8 0v9z" fill="#f5f5f4"/>'}).join("")
+   +'<rect x="188" y="48" width="24" height="14" fill="#f5f5f4"/>'+[191,197,203,209].map(function(x){return '<rect x="'+x+'" y="50" width="2" height="10" fill="#b91c1c"/>'}).join("")
+   +tent(200,48,22,38)+star(200,4,7)
+   /* стена */
+   +'<rect x="0" y="166" width="400" height="58" fill="url(#lmRb)"/><path d="'+m+'" fill="#991b1b"/>'
+   +'<path d="M0 182h400M0 196h400M0 210h400" stroke="#7f1d1d" stroke-width=".8" opacity=".6"/>'
+   +'<rect x="0" y="222" width="400" height="40" fill="#4b5563"/><path d="M0 230h400M0 242h400" stroke="#6b7280" stroke-width="1"/>';
+  return '<svg viewBox="0 0 400 260" preserveAspectRatio="xMidYMax slice">'+s+'</svg>'}
+ if(c=="ae"){var segs=[[34,250,222],[30,222,196],[27,196,172],[24,172,150],[21,150,128],[18,128,108],[15,108,90],[12,90,74],[9,74,60],[6.5,60,48],[4.5,48,38]],tw='';
+  segs.forEach(function(g,i){var off=(i%2?1:-1)*1.2,x0=200-g[0]+off,x1=200+g[0]+off;tw+='<rect x="'+x0+'" y="'+g[2]+'" width="'+(x1-x0)+'" height="'+(g[1]-g[2])+'" fill="url(#lmBk)"/><rect x="'+(x0-1.5)+'" y="'+g[2]+'" width="'+(x1-x0+3)+'" height="1.8" fill="#e2e8f0"/>';
+   for(var k=-2;k<=2;k++)tw+='<path d="M'+(200+off+k*g[0]/2.6)+' '+g[2]+'V'+g[1]+'" stroke="#475569" stroke-width=".6" opacity=".7"/>'});
+  tw+='<path d="M198.6 38L200 0L201.4 38Z" fill="#e2e8f0"/><circle cx="200" cy="2" r="2.2" fill="#fff" class="lst"/>';
+  var city='',win='';[[40,150,24,1],[70,120,20,0],[98,168,18,0],[118,140,16,2],[268,130,18,2],[292,105,22,1],[322,150,24,0],[352,124,20,0]].forEach(function(t){var x=t[0],y=t[1],w=t[2];
+   city+=t[3]==1?'<path d="M'+x+' 230V'+(y+14)+'L'+(x+w)+' '+y+'V230Z" fill="#334155"/>':t[3]==2?'<path d="M'+x+' 230V'+y+'Q'+(x+w/2)+' '+(y-14)+' '+(x+w)+' '+y+'V230Z" fill="#1e293b"/>':'<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+(230-y)+'" fill="#1e3a5f"/>';
+   for(var yy=y+12;yy<224;yy+=9)win+='<rect x="'+(x+3)+'" y="'+yy+'" width="'+(w-6)+'" height="2" fill="#fde68a" opacity="'+(.35+((x+yy)%5)/10)+'"/>'});
+  var s='<defs><linearGradient id="lmBk" x1="0" x2="1"><stop offset="0" stop-color="#64748b"/><stop offset=".3" stop-color="#cbd5e1"/><stop offset=".48" stop-color="#f8fafc"/><stop offset=".62" stop-color="#94a3b8"/><stop offset="1" stop-color="#475569"/></linearGradient><linearGradient id="lmSea" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#f59e0b"/><stop offset="1" stop-color="#7c2d12"/></linearGradient></defs>'
+   +'<path d="M136 232Q140 160 158 120Q164 176 166 232Z" fill="#e2e8f0" opacity=".85"/><path d="M158 120V232" stroke="#94a3b8" stroke-width="1"/>'+city+win+tw
+   +'<rect x="0" y="228" width="400" height="34" fill="url(#lmSea)"/><path d="M188 236h24M184 244h32M180 253h40" stroke="#fde68a" stroke-width="2" opacity=".75"/>';
+  return '<svg viewBox="0 0 400 260" preserveAspectRatio="xMidYMax slice">'+s+'</svg>'}
+ return old(c)}})();
+/* ---- выбор страны прямо в «Звёздной крутке»; лишняя полоса-кнопка убрана ---- */
+(function(){var x0=xspDraw;xspDraw=function(){x0.apply(this,arguments);try{xctDraw()}catch(e){}};
+ var u=ctUI;ctUI=function(){u();var b=$("ctsb");if(b)b.hidden=true;try{xctDraw()}catch(e){}}})();
+function xctDraw(){var el=$("xsp");if(!el||el.hidden)return;var hd=el.querySelector(".xsh");if(!hd)return;
+ var w=$("xct");if(!w||w.parentNode!==el){w=document.createElement("div");w.id="xct";w.className="xct";hd.parentNode.insertBefore(w,hd.nextSibling);
+  w.onclick=function(e){var b=e.target.closest("[data-xc]");if(!b||busy||pend)return;var c=b.dataset.xc;if(c==CTRY)return;ctPick("cts",c)}}
+ w.innerHTML=["uz","ru","ae"].map(function(c){var lk=ctLk(c);return '<button data-xc="'+c+'" class="'+(CTRY==c?"on":"")+(lk?" lk":"")+'">'+FLG[c]+'<b>'+CTN[c]+'</b><small>'+(c=="uz"?"25 ⭐":lk?"🔒 открыть":CTSP[c]+" ⭐")+'</small></button>'}).join("");
+ var f=CTRY!="uz";el.classList.toggle("xfor",f);var cf=$("xcf");
+ if(f){if(!cf||cf.parentNode!==el){cf=document.createElement("div");cf.id="xcf";cf.className="xcf";w.parentNode.insertBefore(cf,w.nextSibling);cf.onclick=function(e){if(e.target.closest("[data-xcs]"))ctStarSpin()}}
+  var P=CTSD[CTRY],pc=function(x){return (Math.round(x*1000)/10).toString().replace(".",",")+"%"};
+  cf.innerHTML='<div class="xsum"><span>Эпик <b>'+pc(P[2])+'</b></span><span>Легенда <b>'+pc(P[3])+'</b></span><span class="sx">ONE OF ONE <b>'+pc(P[4]+P[5])+'</b></span></div>'
+   +'<div class="xcfn">'+(CTRY=="ru"?"Спецсерии КРА · АМР · ЕКХ · ВОР и московские ООО, ААА, МММ — чаще в 10+ раз":"Однозначные и двузначные AA · BB · CC — ONE OF ONE, чаще в 10+ раз")+'. Регион — '+ctRegName(CTRY)+'.</div>'
+   +'<button class="xbuy" data-xcs="1" id="ctsb2">🎰 Крутить '+(CTRY=="ru"?"Россию":"ОАЭ")+' · '+CTSP[CTRY]+' ⭐</button>'}
+ else if(cf)cf.remove()}
+
+/* ---- в другой стране цены на кнопках — в местной валюте ---- */
+function locOf(n){return fxMoney(n/FX[CTRY],CTRY)}
+(function(){var sa=showAct;showAct=function(){sa();if(CTRY!="uz"&&pend){$("sv").textContent="💰 Продать · "+locOf(val(pend));try{var r=$("res"),v=val(pend);r.textContent=r.textContent.replace(sh(v),locOf(v))}catch(e){}}};
+ var u=ctUI;ctUI=function(){u();if(CTRY!="uz"&&!busy&&!pend&&$("go").textContent.indexOf("Пропустить")<0)$("go").textContent="Крутить · "+locOf(ctSum(CTRY))+(CTRY=="ae"&&AECUR=="usd"?" ($)":"")}})();
 </script>
 <style id="ctryc">
 /* ===== номера России ===== */
@@ -2874,6 +2934,27 @@ body[data-ct=ru] .ctb{border-color:#3b5bdb99}body[data-ct=ae] .ctb{border-color:
 .fx3 .fttl svg{width:58px;height:29px;border-radius:5px;box-shadow:0 6px 16px #0006}
 .fx3 .fttl b{font:900 clamp(34px,10vw,64px)/1 system-ui;letter-spacing:.12em}.fx3 .fttl small{font:800 14px system-ui;opacity:.95;letter-spacing:.06em}
 @keyframes fttl{from{transform:translateY(-20px) scale(.7);opacity:0}to{transform:none;opacity:1}}
+.bals{display:block;font-size:10.5px;color:var(--mut);font-weight:700;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.bals[hidden]{display:none}.tile em.cvl{font-style:normal;color:#4ade80;font-weight:800}
+/* российский номер как оригинал (ГОСТ): белый, тонкая чёрная рамка, металлический кант, заклёпки, буквы ниже цифр, шрифт жирный узкий */
+.plate.ru.ru{background:linear-gradient(180deg,#fff,#f3f4f6)!important;border:.055em solid #151515!important;border-radius:.13em!important;box-shadow:0 0 0 .05em #d4d4d8,0 0 0 .08em #9ca3af,0 .14em .4em #0007!important;height:1.42em}
+.plate.ru.ru .num{font-family:"Roboto Condensed","Arial Narrow",sans-serif!important;font-weight:800!important;gap:.08em!important;padding:0 .2em 0 .42em!important;letter-spacing:0!important;align-items:flex-end!important;padding-bottom:.13em!important;
+ background:radial-gradient(circle at .17em 50%,#a1a1aa 0 .045em,#52525b .05em,transparent .065em) no-repeat}
+.plate.ru.ru .num span{font-size:.8em!important;letter-spacing:.04em!important;padding-bottom:0!important;font-weight:800!important;line-height:1}
+.plate.ru.ru .num b{font-size:1.1em!important;letter-spacing:.015em!important;font-weight:800!important;line-height:.86}
+.plate.ru.ru .rur{border-left:.055em solid #151515!important;padding:.06em .3em 0 .14em!important;min-width:1.5em;justify-content:flex-start!important;align-items:center;
+ background:radial-gradient(circle at calc(100% - .14em) 50%,#a1a1aa 0 .045em,#52525b .05em,transparent .065em) no-repeat,linear-gradient(180deg,#fff,#f3f4f6)}
+.plate.ru.ru .rur.rgold{background:radial-gradient(circle at calc(100% - .14em) 50%,#a1a1aa 0 .045em,#52525b .05em,transparent .065em) no-repeat,linear-gradient(160deg,#fff3b0,#e6b422 45%,#fff1a8 60%,#c9961a)}
+.plate.ru.ru .rur b{font-family:"Roboto Condensed","Arial Narrow",sans-serif!important;font-weight:800!important;font-size:.74em!important;line-height:.95!important;letter-spacing:-.01em!important}
+.plate.ru.ru .rur u{font-family:"Roboto Condensed",Arial,sans-serif!important;font-weight:700!important;font-size:.24em!important;letter-spacing:.1em!important;margin-top:.12em!important;gap:.3em!important}
+.plate.ru.ru .rfl{width:1.7em!important;height:1em!important}
+.plate.ru.ru:after{background:linear-gradient(180deg,#ffffff66 0,transparent 40%,#0000000d 100%)}
+#xgo,#ctsb{display:none!important}
+.xct{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:10px 0 8px}
+.xct button{display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:14px;border:1.5px solid var(--ln);background:var(--c2);color:var(--tx)}
+.xct button svg{width:28px;height:14px;border-radius:3px}.xct button b{font-size:12.5px}.xct button small{font-size:10.5px;color:var(--mut);font-weight:800}
+.xct button.on{border-color:#fbbf24;background:linear-gradient(160deg,#f59e0b33,var(--c2));box-shadow:0 0 0 2px #fbbf2444}.xct button.lk{opacity:.55}
+#xsp.xfor>*:not(.xsh):not(#xct):not(#xcf):not(.row):not(.pkb){display:none!important}
+.xcf .xsum{margin-bottom:8px}.xcfn{font-size:12px;color:var(--mut);text-align:center;margin:0 4px 10px;line-height:1.35}
 </style>
 
 <script id="up5s">(function(){"use strict";

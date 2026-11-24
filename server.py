@@ -378,7 +378,7 @@ def uclaim(b):   # игрок выбил номер: если это Мифик/
     if tier_py(p) < 4: return {"ok": 1, "free": 1}
     c.execute("INSERT OR IGNORE INTO uniq(key,owner,ts) VALUES(?,?,?)", (ukey(p), uid, int(time.time())))   # кто успел первым - тот и владелец
     new = c.execute("SELECT changes()").fetchone()[0] == 1
-    if new and uid not in HIDDEN and lim_hit("ucl", uid, 1, UCL_DAY):   # слишком много новых редких номеров за сутки - так не бывает, это накрутка
+    if new and uid not in HIDDEN and not int(_meta_get(c, "ctsp:%d" % uid) or 0) and lim_hit("ucl", uid, 1, UCL_DAY):   # звёздная крутка страны (оплачена ⭐) в лимит не считается   # слишком много новых редких номеров за сутки - так не бывает, это накрутка
         c.execute("DELETE FROM uniq WHERE key=? AND owner=?", (ukey(p), uid)); c.commit()
         log.warning("ПОДОЗРЕНИЕ: %s превысил суточный лимит редких номеров", uid)
         if not lim_hit("ucl_al", uid, 1, 1): alert_admins("⚠️ Игрок ID %s пытается получить больше %d Мифик/Секретных номеров за сутки (возможный чит). Лишние номера отклонены." % (uid, UCL_DAY))
